@@ -6,7 +6,6 @@ import logging
 import uuid
 from backend.services.qwen_client import QwenClient
 from backend.services.token_calc import calculate_usage
-from backend.services.tool_sieve import ToolSieve
 from backend.services.prompt_builder import build_prompt_with_tools
 
 log = logging.getLogger("qwen2api.chat")
@@ -58,107 +57,123 @@ async def chat_completions(request: Request):
     log.info(f"[OAI] model={model}, stream=True, tools={[t.get('function', {}).get('name') for t in tools]}, prompt_len={len(content)}")
 
     # 无感重试调用
-    try:
-        events, chat_id, acc = await client.chat_stream_events_with_retry(model, content)
-    except Exception as e:
-        log.error(f"Chat request failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
     async def generate():
-        full_text = ""
-        sieve = ToolSieve()
-        try:
-            for evt in events:
-                if evt.get("type") == "delta":
-                    text = evt.get("content", "")
-                    safe_text, tool_calls = sieve.process_delta(text)
-                    full_text += safe_text
-
-                    if safe_text:
+        current_prompt = content
+        
+        for stream_attempt in range(5):
+            try:
+                events, chat_id, acc = await client.chat_stream_events_with_retry(model, current_prompt)
+                
+                # Buffer all events
+                thinking_chunks = []
+                answer_chunks = []
+                for evt in events:
+                    if evt.get("type") != "delta":
+                        continue
+                    phase = evt.get("phase", "")
+                    cont = evt.get("content", "")
+                    if phase in ("think", "thinking_summary") and cont:
+                        thinking_chunks.append(cont)
+                    elif phase == "answer" and cont:
+                        answer_chunks.append(cont)
+                    if evt.get("status") == "finished" and phase == "answer":
+                        break
+                        
+                answer_text = "".join(answer_chunks)
+                reasoning_text = "".join(thinking_chunks)
+                
+                # Detect Qwen native tool call interception
+                import re
+                native_blocked_m = re.match(r'^Tool (\w+) does not exists?\.?$', answer_text.strip())
+                if native_blocked_m and tools and stream_attempt < 4:
+                    blocked_name = native_blocked_m.group(1)
+                    client.account_pool.release(acc)
+                    import asyncio
+                    asyncio.create_task(client.delete_chat(acc.token, chat_id))
+                    log.warning(f"[NativeBlock-OAI] Qwen拦截原生工具调用 '{blocked_name}'，重试 (attempt {stream_attempt+1}/5)")
+                    from backend.services.tool_parser import inject_format_reminder
+                    current_prompt = inject_format_reminder(current_prompt, blocked_name)
+                    await asyncio.sleep(0.5)
+                    continue
+                    
+                # Parse tools
+                from backend.services.tool_parser import parse_tool_calls
+                if tools:
+                    blocks, stop_reason = parse_tool_calls(answer_text, tools)
+                else:
+                    blocks = [{"type": "text", "text": answer_text}]
+                    stop_reason = "stop"
+                    
+                if stop_reason == "end_turn":
+                    stop_reason = "stop"
+                    
+                completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+                
+                # Thinking blocks
+                if reasoning_text:
+                    # In OpenAI format, reasoning is usually not natively supported in chunks unless using reasoning_content,
+                    # but we can output it as content or ignore it. For now, we'll output it as content.
+                    chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"content": reasoning_text}, "finish_reason": None}]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    
+                for blk in blocks:
+                    if blk["type"] == "text" and blk.get("text"):
                         chunk = {
-                            "id": "chatcmpl-123",
+                            "id": completion_id,
                             "object": "chat.completion.chunk",
                             "model": model,
-                            "choices": [{"index": 0, "delta": {"content": safe_text}, "finish_reason": None}]
+                            "choices": [{"index": 0, "delta": {"content": blk["text"]}, "finish_reason": None}]
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
-
-                    for tc in tool_calls:
-                        log.info(f"[OAI] Tool Call Emitted: {tc.get('name')} with args: {tc.get('input')}")
-                        # 转换 tool call 格式为 OpenAI 兼容
+                    elif blk["type"] == "tool_use":
                         tc_chunk = {
-                            "id": "chatcmpl-123",
+                            "id": completion_id,
                             "object": "chat.completion.chunk",
                             "model": model,
                             "choices": [{"index": 0, "delta": {
                                 "tool_calls": [{
-                                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                                    "id": blk["id"],
                                     "type": "function",
                                     "function": {
-                                        "name": tc.get("name", ""),
-                                        "arguments": json.dumps(tc.get("input", {}))
+                                        "name": blk["name"],
+                                        "arguments": json.dumps(blk.get("input", {}), ensure_ascii=False)
                                     }
                                 }]
                             }, "finish_reason": "tool_calls"}]
                         }
                         yield f"data: {json.dumps(tc_chunk)}\n\n"
-
-            # flush 残余文本
-            safe_text, tool_calls = sieve.flush()
-            full_text += safe_text
-            if safe_text:
-                chunk = {
-                    "id": "chatcmpl-123",
+                        
+                # Final chunk
+                final_chunk = {
+                    "id": completion_id,
                     "object": "chat.completion.chunk",
                     "model": model,
-                    "choices": [{"index": 0, "delta": {"content": safe_text}, "finish_reason": None}]
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": stop_reason}]
                 }
-                yield f"data: {json.dumps(chunk)}\n\n"
-            
-            for tc in tool_calls:
-                log.info(f"[OAI] Tool Call Emitted (flushed): {tc.get('name')} with args: {tc.get('input')}")
-                tc_chunk = {
-                    "id": "chatcmpl-123",
-                    "object": "chat.completion.chunk",
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {
-                        "tool_calls": [{
-                            "id": f"call_{uuid.uuid4().hex[:8]}",
-                            "type": "function",
-                            "function": {
-                                "name": tc.get("name", ""),
-                                "arguments": json.dumps(tc.get("input", {}))
-                            }
-                        }]
-                    }, "finish_reason": "tool_calls"}]
-                }
-                yield f"data: {json.dumps(tc_chunk)}\n\n"
+                yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                
+                log.info(f"[OAI] Request complete. Generated {len(answer_text)} characters.")
+                
+                users = await users_db.get()
+                for u in users:
+                    if u["id"] == token:
+                        u["used_tokens"] += len(answer_text) + len(current_prompt)
+                        break
+                await users_db.save(users)
+                
+                client.account_pool.release(acc)
+                import asyncio
+                asyncio.create_task(client.delete_chat(acc.token, chat_id))
+                return
+                
+            except Exception as e:
+                log.error(f"Chat request failed: {e}")
+                return
 
-            # 打印最终输出长度便于调试
-            log.info(f"[OAI] Request complete. Generated {len(full_text)} characters.")
-                    
-            # 扣费统计
-            usage = calculate_usage(content, full_text)
-            chunk = {
-                "id": "chatcmpl-123",
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                "usage": usage
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-            
-            # 更新数据库 (异步锁保护)
-            users = await users_db.get()
-            for u in users:
-                if u["id"] == token:
-                    u["used_tokens"] += usage["total_tokens"]
-                    break
-            await users_db.save(users)
-            
-        finally:
-            client.account_pool.release(acc)
-            asyncio.create_task(client.delete_chat(acc.token, chat_id))
-            
     return StreamingResponse(generate(), media_type="text/event-stream")

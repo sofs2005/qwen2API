@@ -7,7 +7,6 @@ import uuid
 from backend.services.qwen_client import QwenClient
 from backend.services.token_calc import calculate_usage
 from backend.services.prompt_builder import build_prompt_with_tools
-from backend.services.tool_sieve import ToolSieve
 from backend.core.config import resolve_model
 
 log = logging.getLogger("qwen2api.anthropic")
@@ -61,14 +60,8 @@ async def anthropic_messages(request: Request):
     if system_text:
         oai_msgs.append({"role": "system", "content": system_text})
     for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        # 处理 Claude 特有的数组形式
-        if isinstance(content, list):
-            text_blocks = [blk.get("text", "") for blk in content if blk.get("type") == "text"]
-            content = "\n".join(text_blocks)
-        oai_msgs.append({"role": role, "content": content})
-        
+        oai_msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+
     content = build_prompt_with_tools(oai_msgs, tools)
             
     log.info(f"[Anthropic] model={model}, stream=True, tools={[t.get('name') for t in tools]}, prompt_len={len(content)}")
@@ -80,136 +73,96 @@ async def anthropic_messages(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
         
     async def generate():
-        full_text = ""
-        sieve = ToolSieve()
+        current_prompt = content
         
-        # 预计算输入 token
-        input_usage = calculate_usage(content, "")["prompt_tokens"]
-        
-        # 状态追踪：满足 Anthropic 严格的流式事件顺序
-        has_started_text = False
-        current_index = 0
-        has_tool_call = False
-        
-        try:
-            # 初始 MessageStart
-            start_event = {
-                "type": "message_start",
-                "message": {
-                    "id": f"msg_{uuid.uuid4().hex[:12]}", 
-                    "type": "message", 
-                    "role": "assistant", 
-                    "model": model, 
-                    "content": [],
-                    "usage": {"input_tokens": input_usage, "output_tokens": 0}
-                }
-            }
-            yield f"event: message_start\ndata: {json.dumps(start_event)}\n\n"
-
-
-            for evt in events:
-                if evt.get("type") == "delta":
-                    text = evt.get("content", "")
-                    safe_text, tool_calls = sieve.process_delta(text)
-                    full_text += safe_text
-
-                    if safe_text:
-                        if not has_started_text:
-                            yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': current_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-
-                            has_started_text = True
-                            
-                        chunk = {
-                            "type": "content_block_delta",
-                            "index": current_index,
-                            "delta": {"type": "text_delta", "text": safe_text}
-                        }
-                        yield f"event: content_block_delta\ndata: {json.dumps(chunk)}\n\n"
-
-
-                    for tc in tool_calls:
-                        has_tool_call = True
-                        if has_started_text:
-                            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': current_index})}\n\n"
-
-                            has_started_text = False
-                            current_index += 1
-                            
-                        log.info(f"[Anthropic] Tool Call Emitted: {tc.get('name')} with args: {tc.get('input')}")
-                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': current_index, 'content_block': {'type': 'tool_use', 'id': f'toolu_{uuid.uuid4().hex[:8]}', 'name': tc.get('name', ''), 'input': {}}})}\n\n"
-
-                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': current_index, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(tc.get('input', {}), ensure_ascii=False)}})}\n\n"
-
-                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': current_index})}\n\n"
-
-                        current_index += 1
-
-            # flush 残余文本
-            safe_text, tool_calls = sieve.flush()
-            full_text += safe_text
-            
-            if safe_text:
-                if not has_started_text:
-                    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': current_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-
-                    has_started_text = True
-                    
-                chunk = {
-                    "type": "content_block_delta",
-                    "index": current_index,
-                    "delta": {"type": "text_delta", "text": safe_text}
-                }
-                yield f"event: content_block_delta\ndata: {json.dumps(chunk)}\n\n"
-
-
-            for tc in tool_calls:
-                has_tool_call = True
-                if has_started_text:
-                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': current_index})}\n\n"
-
-                    has_started_text = False
-                    current_index += 1
-                    
-                log.info(f"[Anthropic] Tool Call Emitted (flushed): {tc.get('name')} with args: {tc.get('input')}")
-                yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': current_index, 'content_block': {'type': 'tool_use', 'id': f'toolu_{uuid.uuid4().hex[:8]}', 'name': tc.get('name', ''), 'input': {}}})}\n\n"
-
-                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': current_index, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(tc.get('input', {}), ensure_ascii=False)}})}\n\n"
-
-                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': current_index})}\n\n"
-
-                current_index += 1
+        for stream_attempt in range(5): # MAX_RETRIES
+            try:
+                events, chat_id, acc = await client.chat_stream_events_with_retry(resolved_model, current_prompt)
                 
-            if has_started_text:
-                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': current_index})}\n\n"
+                # Buffer all events
+                thinking_chunks = []
+                answer_chunks = []
+                for evt in events:
+                    if evt.get("type") != "delta":
+                        continue
+                    phase = evt.get("phase", "")
+                    cont = evt.get("content", "")
+                    if phase in ("think", "thinking_summary") and cont:
+                        thinking_chunks.append(cont)
+                    elif phase == "answer" and cont:
+                        answer_chunks.append(cont)
+                    if evt.get("status") == "finished" and phase == "answer":
+                        break
+                        
+                answer_text = "".join(answer_chunks)
+                reasoning_text = "".join(thinking_chunks)
+                
+                # Detect Qwen native tool call interception
+                import re
+                native_blocked_m = re.match(r'^Tool (\w+) does not exists?\.?$', answer_text.strip())
+                if native_blocked_m and tools and stream_attempt < 4:
+                    blocked_name = native_blocked_m.group(1)
+                    client.account_pool.release(acc)
+                    import asyncio
+                    asyncio.create_task(client.delete_chat(acc.token, chat_id))
+                    log.warning(f"[NativeBlock-ANT] Qwen拦截原生工具调用 '{blocked_name}'，重试 (attempt {stream_attempt+1}/5)")
+                    from backend.services.tool_parser import inject_format_reminder
+                    current_prompt = inject_format_reminder(current_prompt, blocked_name)
+                    await asyncio.sleep(0.5)
+                    continue
+                    
+                # Parse tools
+                from backend.services.tool_parser import parse_tool_calls
+                if tools:
+                    blocks, stop_reason = parse_tool_calls(answer_text, tools)
+                else:
+                    blocks = [{"type": "text", "text": answer_text}]
+                    stop_reason = "end_turn"
+                    
+                input_usage = len(current_prompt) # simple char len approx or precise
+                
+                msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+                yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': resolved_model, 'stop_reason': None, 'usage': {'input_tokens': input_usage, 'output_tokens': 0}}})}\n\n"
 
-                has_started_text = False
+                block_idx = 0
 
-            log.info(f"[Anthropic] Request complete. Generated {len(full_text)} characters.")
+                # Thinking block
+                if reasoning_text:
+                    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_idx, 'content_block': {'type': 'thinking', 'thinking': ''}})}\n\n"
+                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': block_idx, 'delta': {'type': 'thinking_delta', 'thinking': reasoning_text}})}\n\n"
+                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_idx})}\n\n"
+                    block_idx += 1
 
-            usage = calculate_usage(content, full_text)
+                # Text + tool_use blocks
+                for blk in blocks:
+                    if blk["type"] == "text" and blk.get("text"):
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_idx, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': block_idx, 'delta': {'type': 'text_delta', 'text': blk['text']}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_idx})}\n\n"
+                        block_idx += 1
+                    elif blk["type"] == "tool_use":
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_idx, 'content_block': {'type': 'tool_use', 'id': blk['id'], 'name': blk['name'], 'input': {}}})}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': block_idx, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(blk.get('input', {}), ensure_ascii=False)}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_idx})}\n\n"
+                        block_idx += 1
 
-            stop_reason = "tool_use" if has_tool_call else "end_turn"
-            msg_delta = {
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason},
-                "usage": {"output_tokens": usage["completion_tokens"]}
-            }
-            yield f"event: message_delta\ndata: {json.dumps(msg_delta)}\n\n"
-
-            
-            stop_event = {"type": "message_stop"}
-            yield f"event: message_stop\ndata: {json.dumps(stop_event)}\n\n"
-
-
-            users = await users_db.get()
-            for u in users:
-                if u["id"] == token:
-                    u["used_tokens"] += usage["total_tokens"]
-                    break
-            await users_db.save(users)
-
-        finally:
-            client.account_pool.release(acc)
-            asyncio.create_task(client.delete_chat(acc.token, chat_id))
+                yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason}, 'usage': {'output_tokens': len(answer_text)}})}\n\n"
+                yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+                
+                users = await users_db.get()
+                for u in users:
+                    if u["id"] == token:
+                        u["used_tokens"] += len(answer_text) + input_usage
+                        break
+                await users_db.save(users)
+                
+                client.account_pool.release(acc)
+                import asyncio
+                asyncio.create_task(client.delete_chat(acc.token, chat_id))
+                return
+                
+            except Exception as e:
+                log.error(f"Anthropic stream error: {e}")
+                return
 
     return StreamingResponse(generate(), media_type="text/event-stream")
