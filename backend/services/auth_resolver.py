@@ -24,8 +24,7 @@ def _new_browser():
         enable_cache=True,
         block_images=True,
         i_know_what_im_doing=True,
-        os=["windows"],
-        window_size=(1920, 1080)
+        os=["windows"]
     )
 
 async def get_fresh_token(email: str, password: str) -> str:

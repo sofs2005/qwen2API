@@ -64,7 +64,6 @@ _CAMOUFOX_OPTS = {
     "enable_cache": True,
     "block_images": True,
     "os": ["windows"],
-    "window_size": (1920, 1080),
     "firefox_user_prefs": {
         "layers.acceleration.disabled": True,
         "gfx.webrender.enabled": False,
