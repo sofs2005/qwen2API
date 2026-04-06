@@ -325,7 +325,7 @@ async def register_qwen_account() -> Optional[Account]:
             log.info(f"[Register] ✓ 注册完成: {email}")
             return Account(email=email, password=password, token=token, cookies=cookie_str, username=username, activation_pending=False)
         except Exception as e:
-            log.error(f"[Register] 浏览器引擎崩溃或被拦截: {str(e)}")
+            log.error(f"[Refresh] {acc.email} 刷新异常: {e}")
             return None
 
 async def activate_account(acc: Account) -> bool:
@@ -537,10 +537,10 @@ class AuthResolver:
 
     async def refresh_token(self, acc: Account) -> bool:
         if not acc.email or not acc.password:
-            log.warning(f"[Auth] 账号 {acc.email} 缺少密码，无法自愈。")
+            log.warning(f"[Refresh] 账号 {acc.email} 无密码，无法刷新")
             return False
             
-        log.info(f"[Auth] 正在启动独立浏览器为 {acc.email} 自动刷新 Token...")
+        log.info(f"[Refresh] 正在为 {acc.email} 刷新 token...")
         try:
             async with _new_browser() as browser:
                 page = await browser.new_page()
@@ -569,15 +569,16 @@ class AuthResolver:
                     acc.token = new_token
                     acc.valid = True
                     await self.pool.save()
-                    log.info(f"[Auth] 自愈成功，{acc.email} 获得全新 Token。")
+                    old_prefix = acc.token[:20] if acc.token else "空"
+                    log.info(f"[Refresh] {acc.email} token 已更新 ({old_prefix}... → {new_token[:20]}...)")
                     return True
                 elif new_token == acc.token:
                     acc.valid = True
-                    log.info(f"[Auth] {acc.email} 重新校验成功。")
+                    log.info(f"[Refresh] {acc.email} token 未变化，重新标记有效")
                     return True
                 else:
-                    log.error(f"[Auth] {acc.email} 登录失败或遭遇滑块验证拦截。")
+                    log.warning(f"[Refresh] {acc.email} 登录后未获取到token，URL={page.url}")
                     return False
         except Exception as e:
-            log.error(f"[Register] 浏览器引擎崩溃或被拦截: {str(e)}")
+            log.error(f"[Refresh] {acc.email} 刷新异常: {e}")
             return None

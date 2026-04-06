@@ -39,9 +39,9 @@ class QwenClient:
     async def delete_chat(self, token: str, chat_id: str):
         await self.engine.api_call("DELETE", f"/api/v2/chats/{chat_id}", token)
 
-    async def verify_account(self, acc: Account) -> bool:
+    async def verify_token(self, token: str) -> bool:
         """Verify token validity via direct HTTP (no browser page needed)."""
-        if not acc.token:
+        if not token:
             return False
             
         try:
@@ -51,13 +51,13 @@ class QwenClient:
             async with httpx.AsyncClient(timeout=15, trust_env=False) as hc:
                 resp = await hc.get(
                     f"{BASE_URL}/api/v1/auths/",
-                    headers={"Authorization": f"Bearer {acc.token}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
             if resp.status_code != 200:
                 return False
             return resp.json().get("role") == "user"
         except Exception as e:
-            log.warning(f"[Verify] Account {acc.email} HTTP error: {e}")
+            log.warning(f"[verify_token] HTTP error: {e}")
             return False
 
     def _build_payload(self, chat_id: str, model: str, content: str) -> dict:
