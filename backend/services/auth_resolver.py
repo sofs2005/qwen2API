@@ -66,6 +66,14 @@ class _EmailSession:
                 self._token_expires_at = auth_data.get("expires_at", 0)
                 self._initialized = True
                 return True
+            # 新增获取 Token 的 fallback 逻辑
+            resp = self._session.get(f"{MAIL_BASE}/api/auth/token", timeout=15)
+            if resp.status_code == 200:
+                auth_data = resp.json()
+                self._current_token = auth_data.get("token", "")
+                self._token_expires_at = auth_data.get("expires_at", 0)
+                self._initialized = True
+                return True
             return False
         except Exception as e:
             log.warning(f"[MailSession] init error: {e}")
@@ -85,7 +93,7 @@ class _EmailSession:
                      "x-inbox-token": self._current_token},
             timeout=15,
         )
-        if resp.status_code == 401:
+        if resp.status_code == 401 or resp.status_code == 403:
             self._initialized = False
             self._init_session()
             resp = self._session.get(
@@ -112,6 +120,10 @@ class _EmailSession:
         while time.time() < deadline:
             attempt += 1
             try:
+                # 尝试获取最新 token，如果缺失的话
+                if not self._current_token:
+                    self._init_session()
+                    
                 resp = self._session.get(
                     f"{MAIL_BASE}/api/emails",
                     params={"email": email},
@@ -119,7 +131,7 @@ class _EmailSession:
                              "x-inbox-token": self._current_token},
                     timeout=15,
                 )
-                if resp.status_code == 401:
+                if resp.status_code == 401 or resp.status_code == 403:
                     self._initialized = False
                     self._init_session()
                     time.sleep(3)
@@ -153,6 +165,16 @@ class _EmailSession:
                                 return link
                         if any(kw in subject.lower() for kw in keywords) and all_links:
                             return all_links[0]
+                elif resp.status_code == 403:
+                    data = resp.json()
+                    if data.get("error") == "Mailbox access denied":
+                        log.warning(f"[MailSession] 邮件API HTTP 403: Mailbox access denied. 可能是Token过期。重新初始化 Session...")
+                        self._initialized = False
+                        self._init_session()
+                        time.sleep(3)
+                        continue
+                    else:
+                        log.warning(f"[MailSession] 邮件API HTTP 403: {resp.text[:100]}")
                 else:
                     log.warning(f"[MailSession] 邮件API HTTP {resp.status_code}: {resp.text[:100]}")
             except Exception as e:
