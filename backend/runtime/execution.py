@@ -308,11 +308,11 @@ async def collect_completion_run(
             if not first_event_marked:
                 metrics.mark("first_event", float(len(raw_events)))
                 first_event_marked = True
-            if on_delta is not None:
-                await on_delta(evt, content, None)
             completed_calls = tool_state.process_event(evt)
             if completed_calls:
                 native_tool_calls.extend(completed_calls)
+                if on_delta is not None:
+                    await on_delta(evt, None, completed_calls)
 
     answer_text = "".join(answer_fragments)
     reasoning_text = "".join(reasoning_fragments)

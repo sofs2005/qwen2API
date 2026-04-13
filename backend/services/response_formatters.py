@@ -6,25 +6,25 @@ from typing import Any
 from backend.runtime.execution import build_tool_directive
 
 
-def build_openai_completion_payload(*, completion_id: str, created: int, model_name: str, prompt: str, execution) -> dict[str, Any]:
-    if execution.state.tool_calls:
+def build_openai_completion_payload(*, completion_id: str, created: int, model_name: str, prompt: str, execution, standard_request) -> dict[str, Any]:
+    directive = build_tool_directive(standard_request, execution.state)
+    if directive.stop_reason == "tool_use":
         oai_tool_calls = [
             {
-                "id": tc["id"],
+                "id": block["id"],
                 "type": "function",
                 "function": {
-                    "name": tc["name"],
-                    "arguments": json.dumps(tc.get("input", {}), ensure_ascii=False),
+                    "name": block["name"],
+                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
                 },
             }
-            for tc in execution.state.tool_calls
+            for block in directive.tool_blocks
+            if block.get("type") == "tool_use"
         ]
         msg: dict[str, Any] = {"role": "assistant", "content": None, "tool_calls": oai_tool_calls}
         finish_reason = "tool_calls"
     else:
         msg = {"role": "assistant", "content": execution.state.answer_text}
-        if execution.state.reasoning_text:
-            msg["reasoning_content"] = execution.state.reasoning_text
         finish_reason = "stop"
 
     return {

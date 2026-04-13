@@ -110,27 +110,19 @@ def _tool_param_hint(tool: dict) -> str:
 
 def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> str:
     MAX_CHARS = 18000 if tools else 120000
-    # When tools are present, skip the user's system prompt entirely.
-    # CLAUDE.md contains "needs-review" format instructions that override our tool call
-    # instructions and prevent the model from generating proper tool calls.
-    if tools:
-        sys_part = ""
-    else:
-        sys_part = f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else ""
+    sys_part = f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else ""
     tools_part = ""
     if tools:
         names = [t.get("name", "") for t in tools if t.get("name")]
         lines = [
-            "=== MANDATORY TOOL CALL INSTRUCTIONS ===",
-            "If you need a tool, output ONLY one tool call block and nothing else.",
-            "Use EXACTLY this format:",
-            "##TOOL_CALL##",
+            "=== TOOL USAGE INSTRUCTIONS ===",
+            "If a tool is needed, reply with exactly one tool call using valid JSON.",
+            "Preferred format:",
             '{"name": "EXACT_TOOL_NAME", "input": {"param1": "value1"}}',
-            "##END_CALL##",
             "Rules:",
-            "- No text before or after the tool call block.",
             "- Use the exact tool name from the list below.",
             "- Put arguments inside the input object.",
+            "- Do not invent tool names.",
             "- If no tool is needed, answer normally.",
             "Available tools:",
         ]
@@ -167,7 +159,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
     budget = MAX_CHARS - overhead
     history_parts = []
     used = 0
-    # When tools are present: skip system-role messages (CLAUDE.md arrives this way)
+    # Keep system-role messages unless they duplicate the top-level system prompt.
     # No hard message count cap — rely only on character budget.
     # Tool results (embedded in user messages) are truncated to 1500 chars to preserve
     # budget for more messages and avoid crowding out the original task.
@@ -181,7 +173,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
         role = msg.get("role", "")
         if role not in ("user", "assistant", "system", "tool"):
             continue
-        if tools and role == "system":
+        if role == "system" and system_prompt and _extract_text(msg.get("content", "")).strip() == system_prompt.strip():
             continue
 
         # ── OpenAI-format tool result (role="tool") ──────────────────────────
@@ -224,7 +216,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
                 except (json.JSONDecodeError, ValueError):
                     args = {"raw": args_str}
                 tc_parts.append(
-                    f'##TOOL_CALL##\n{{"name": {json.dumps(name)}, "input": {json.dumps(args, ensure_ascii=False)}}}\n##END_CALL##'
+                    json.dumps({"name": name, "input": args}, ensure_ascii=False)
                 )
             text = "\n".join(tc_parts)
 

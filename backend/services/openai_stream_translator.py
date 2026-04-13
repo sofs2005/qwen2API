@@ -26,9 +26,6 @@ class OpenAIStreamTranslator:
             self.role_chunk_sent = True
 
         if text_chunk and evt.get("phase") in ("think", "thinking_summary"):
-            self.pending_chunks.append(
-                f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'reasoning_content': text_chunk}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
-            )
             return
 
         if text_chunk and evt.get("phase") == "answer":

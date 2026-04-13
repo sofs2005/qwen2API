@@ -26,7 +26,7 @@ def _extract_call(payload: object, allowed_names: set[str]) -> dict[str, Any] | 
         else:
             raw_input = {}
     return {
-        "name": normalize_tool_name(name, allowed_names),
+        "name": name if isinstance(name, str) and name in allowed_names else normalize_tool_name(name, allowed_names),
         "input": normalize_arguments(raw_input),
     }
 
