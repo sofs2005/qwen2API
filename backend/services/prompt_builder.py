@@ -165,7 +165,6 @@ def _extract_text(content, user_tool_mode: bool = False, client_profile: str = O
 
 def _normalize_tool(tool: dict) -> dict:
     """Normalize OpenAI or Anthropic tool format to internal {name, description, parameters}."""
-    # OpenAI format: {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
     if tool.get("type") == "function" and "function" in tool:
         fn = tool["function"]
         return {
@@ -173,8 +172,6 @@ def _normalize_tool(tool: dict) -> dict:
             "description": fn.get("description", ""),
             "parameters": fn.get("parameters", {}),
         }
-    # Anthropic format: {"name": ..., "description": ..., "input_schema": ...}
-    # or already normalized: {"name": ..., "description": ..., "parameters": ...}
     return {
         "name": tool.get("name", ""),
         "description": tool.get("description", ""),
@@ -202,10 +199,6 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
     budget = MAX_CHARS - overhead
     history_parts = []
     used = 0
-    # Keep system-role messages unless they duplicate the top-level system prompt.
-    # No hard message count cap — rely only on character budget.
-    # Tool results (embedded in user messages) are truncated to 1500 chars to preserve
-    # budget for more messages and avoid crowding out the original task.
     NEEDSREVIEW_MARKERS = ("需求回显", "已了解规则", "等待用户输入", "待执行任务", "待确认事项",
                            "[需求回显]", "**需求回显**")
     msg_count = 0
@@ -219,9 +212,6 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
         if role == "system" and system_prompt and _extract_text(msg.get("content", "")).strip() == system_prompt.strip():
             continue
 
-        # ── OpenAI-format tool result (role="tool") ──────────────────────────
-        # These were previously silently dropped, causing the model to never see
-        # tool results and loop forever repeating the same tool call.
         if role == "tool":
             tool_content = msg.get("content", "") or ""
             tool_call_id = msg.get("tool_call_id", "")
@@ -248,9 +238,6 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
             client_profile=client_profile,
         )
 
-        # ── OpenAI-format assistant tool_calls (content=null + tool_calls[]) ─
-        # When an assistant message has tool_calls but content is null/empty,
-        # render each tool_call as ##TOOL_CALL## so the model sees what it called.
         if role == "assistant" and not text and msg.get("tool_calls"):
             tc_parts = []
             for tc in msg["tool_calls"]:
@@ -264,13 +251,10 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
                 tc_parts.append(_render_history_tool_call(name, args, client_profile))
             text = "\n".join(tc_parts)
 
-        # Skip assistant messages that are just needs-review boilerplate
         if tools and role == "assistant" and any(m in text for m in NEEDSREVIEW_MARKERS):
             log.debug(f"[Prompt] 跳过需求回显式 assistant 消息 ({len(text)}字)")
             msg_count += 1
             continue
-        # Truncate tool results (large user messages containing [Tool Result]) aggressively
-        # so they don't crowd out other context. Plain user messages get more space.
         is_tool_result = role == "user" and ("[Tool Result]" in text or "[tool result]" in text.lower()
                                               or text.startswith("{") or "\"results\"" in text[:100])
         max_len = 600 if is_tool_result else 1400
@@ -284,8 +268,6 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
         used += len(line) + 2
         msg_count += 1
 
-    # 原始任务保护：若第一条 user 消息被挤出了历史窗口，强制补回最前
-    # 这确保模型始终知道用户的原始任务是什么
     if tools and messages:
         first_user = next((m for m in messages if m.get("role") == "user"), None)
         if first_user:
@@ -296,7 +278,6 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
             )
             first_short = first_text[:800] + ("...[原始任务截断]" if len(first_text) > 800 else "")
             first_line = f"Human: {first_short}"
-            # Check if first user message is already at the start of history
             if not history_parts or not history_parts[0].startswith(f"Human: {first_text[:60]}"):
                 first_line_cost = len(first_line) + 2
                 if first_line_cost <= budget:
@@ -347,11 +328,13 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
             tool_instruction_preview,
         )
     parts = []
-    if sys_part: parts.append(sys_part)
+    if sys_part:
+        parts.append(sys_part)
     parts.extend(history_parts)
-    # Tool instructions go LAST — right before "Assistant:" so they have highest priority
-    if tools_part: parts.append(tools_part)
-    if latest_user_line: parts.append(latest_user_line)
+    if tools_part:
+        parts.append(tools_part)
+    if latest_user_line:
+        parts.append(latest_user_line)
     parts.append("Assistant:")
     return "\n\n".join(parts)
 

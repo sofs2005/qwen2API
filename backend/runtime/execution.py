@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable
 
 from backend.adapter.standard_request import StandardRequest
 from backend.core.config import settings
 from backend.core.request_logging import update_request_context
+from backend.runtime.stream_metrics import StreamMetrics
 from backend.services import tool_parser
 from backend.toolcall.normalize import normalize_tool_name
 from backend.toolcall.stream_state import StreamingToolCallState
-
-log = logging.getLogger("qwen2api.runtime")
 
 
 @dataclass(slots=True)
@@ -26,9 +24,7 @@ class RuntimeAttemptState:
     finish_reason: str = "stop"
     raw_events: list[dict[str, Any]] = field(default_factory=list)
     emitted_visible_output: bool = False
-    first_answer_preview: str = ""
-    first_reasoning_preview: str = ""
-    first_tool_call_preview: str = ""
+    stage_metrics: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -94,13 +90,6 @@ class RuntimeAttemptCursor:
 TRAILING_IDLE_AFTER_TOOL_SECONDS = 2.0
 
 
-def _preview_text(text: str, limit: int = 240) -> str:
-    if not text:
-        return ""
-    compact = " ".join(str(text).split())
-    return compact[:limit] + ("...[truncated]" if len(compact) > limit else "")
-
-
 __all__ = [
     "RuntimeAttemptState",
     "RuntimeExecutionResult",
@@ -117,10 +106,10 @@ __all__ = [
     "anthropic_stream_usage_delta",
     "build_retry_loop",
     "build_tool_directive",
-    "build_usage_delta_factory",
     "begin_runtime_attempt",
     "cleanup_runtime_resources",
     "collect_completion_run",
+    "continue_after_retry_directive",
     "evaluate_retry_directive",
     "extract_blocked_tool_names",
     "finalize_anthropic_stream_success",
@@ -132,6 +121,7 @@ __all__ = [
     "parse_tool_directive_once",
     "plan_runtime_attempts",
     "recent_same_tool_identity_count",
+    "retryable_usage_delta",
     "should_force_finish_after_tool_use",
     "tool_identity",
 ]
@@ -156,10 +146,6 @@ def extract_blocked_tool_names(text: str, allowed_tool_names: list[str] | None =
     if not allowed_tool_names:
         return blocked
     return [normalize_tool_name(name, allowed_tool_names) for name in blocked]
-
-
-def normalize_tool_name_for_retry(tool_name: str, allowed_tool_names: list[str] | None) -> str:
-    return normalize_tool_name(tool_name, allowed_tool_names or [])
 
 
 def _recent_message_texts(messages: list[dict[str, Any]] | None, *, limit: int = 10) -> list[str]:
@@ -212,8 +198,6 @@ def tool_identity(tool_name: str, tool_input: Any = None) -> str:
     try:
         if tool_name == "Read" and isinstance(tool_input, dict):
             return f"Read::{tool_input.get('file_path', '').strip()}"
-        if tool_name == "read" and isinstance(tool_input, dict):
-            return f"read::{tool_input.get('path', '').strip()}"
         return f"{tool_name}::{json.dumps(tool_input or {}, ensure_ascii=False, sort_keys=True)}"
     except Exception:
         return tool_name or ""
@@ -244,27 +228,6 @@ def recent_same_tool_identity_count(messages: list[dict[str, Any]] | None, tool_
     return count
 
 
-def has_recent_openai_same_tool_call(history_messages: list[dict[str, Any]] | None, tool_name: str, tool_input: Any = None) -> bool:
-    target = tool_identity(tool_name, tool_input)
-    for msg in reversed(history_messages or []):
-        if msg.get("role") != "assistant":
-            continue
-        tool_calls = msg.get("tool_calls")
-        if not isinstance(tool_calls, list) or not tool_calls:
-            continue
-        if len(tool_calls) != 1:
-            return False
-        fn = tool_calls[0].get("function", {}) if isinstance(tool_calls[0], dict) else {}
-        name = fn.get("name", "")
-        raw_args = fn.get("arguments", "{}")
-        try:
-            parsed_args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args else raw_args
-        except (json.JSONDecodeError, ValueError):
-            parsed_args = {"raw": raw_args}
-        return tool_identity(name, parsed_args) == target
-    return False
-
-
 def native_tool_calls_to_markup(tool_calls: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for tool_call in tool_calls:
@@ -272,6 +235,43 @@ def native_tool_calls_to_markup(tool_calls: list[dict[str, Any]]) -> str:
             f'<tool_call>{{"name": {json.dumps(tool_call["name"])}, "input": {json.dumps(tool_call.get("input", {}), ensure_ascii=False)}}}</tool_call>'
         )
     return "\n".join(parts)
+
+
+async def run_runtime_attempt(
+    *,
+    client,
+    request: StandardRequest,
+    current_prompt: str,
+    history_messages: list[dict[str, Any]] | None,
+    attempt_index: int,
+    max_attempts: int,
+    allow_after_visible_output: bool = False,
+    capture_events: bool = True,
+    on_delta: Callable[[dict[str, Any], str | None, list[dict[str, Any]] | None], Awaitable[None]] | None = None,
+) -> RuntimeAttemptOutcome:
+    attempt_cursor = begin_runtime_attempt(attempt_index)
+    execution = await collect_completion_run(
+        client,
+        request,
+        current_prompt,
+        capture_events=capture_events,
+        on_delta=on_delta,
+    )
+    retry = evaluate_retry_directive(
+        request=request,
+        current_prompt=current_prompt,
+        history_messages=history_messages,
+        attempt_index=attempt_cursor.index,
+        max_attempts=max_attempts,
+        state=execution.state,
+        allow_after_visible_output=allow_after_visible_output,
+    )
+    continuation = await continue_after_retry_directive(
+        client=client,
+        execution=execution,
+        retry=retry,
+    )
+    return RuntimeAttemptOutcome(execution=execution, continuation=continuation)
 
 
 async def collect_completion_run(
@@ -287,13 +287,10 @@ async def collect_completion_run(
     answer_fragments: list[str] = []
     reasoning_fragments: list[str] = []
     native_tool_calls: list[dict[str, Any]] = []
-    first_answer_preview = ""
-    first_reasoning_preview = ""
-    first_tool_call_preview = ""
     tool_state = StreamingToolCallState()
     emitted_visible_output = False
     raw_events: list[dict[str, Any]] = []
-    first_event_marked = False
+    metrics = StreamMetrics()
 
     async for item in client.chat_stream_events_with_retry(
         request.resolved_model,
@@ -304,6 +301,7 @@ async def collect_completion_run(
             chat_id = item.get("chat_id")
             acc = item.get("acc")
             update_request_context(chat_id=chat_id)
+            metrics.mark("chat_created", float(len(raw_events)))
             continue
         if item.get("type") != "event":
             continue
@@ -319,41 +317,29 @@ async def collect_completion_run(
 
         if phase in ("think", "thinking_summary") and content:
             reasoning_fragments.append(content)
-            if not first_reasoning_preview:
-                first_reasoning_preview = _preview_text(content)
-                if request.tools:
-                    log.info("[Runtime] first_reasoning_delta=%r", first_reasoning_preview)
             emitted_visible_output = True
-            if not first_event_marked:
-                first_event_marked = True
+            if "first_event" not in metrics.summary():
+                metrics.mark("first_event", float(len(raw_events)))
             if on_delta is not None:
                 await on_delta(evt, content, None)
             continue
 
         if phase == "answer" and content:
             answer_fragments.append(content)
-            if not first_answer_preview:
-                first_answer_preview = _preview_text(content)
-                if request.tools:
-                    log.info("[Runtime] first_answer_delta=%r", first_answer_preview)
             emitted_visible_output = True
-            if not first_event_marked:
-                first_event_marked = True
+            if "first_event" not in metrics.summary():
+                metrics.mark("first_event", float(len(raw_events)))
             if on_delta is not None:
                 await on_delta(evt, content, None)
             continue
 
         if phase == "tool_call":
             emitted_visible_output = True
-            if not first_event_marked:
-                first_event_marked = True
+            if "first_event" not in metrics.summary():
+                metrics.mark("first_event", float(len(raw_events)))
             completed_calls = tool_state.process_event(evt)
             if completed_calls:
                 native_tool_calls.extend(completed_calls)
-                if not first_tool_call_preview:
-                    first_tool_call_preview = _preview_text(json.dumps(completed_calls[0], ensure_ascii=False), 320)
-                    if request.tools:
-                        log.info("[Runtime] first_native_tool_call=%r", first_tool_call_preview)
                 if on_delta is not None:
                     await on_delta(evt, None, completed_calls)
 
@@ -362,6 +348,7 @@ async def collect_completion_run(
     if native_tool_calls and not answer_text:
         answer_text = native_tool_calls_to_markup(native_tool_calls)
 
+    metrics.mark("stream_finish", float(len(raw_events)))
     state = RuntimeAttemptState(
         answer_text=answer_text,
         reasoning_text=reasoning_text,
@@ -370,29 +357,12 @@ async def collect_completion_run(
         finish_reason="tool_calls" if native_tool_calls else "stop",
         raw_events=raw_events,
         emitted_visible_output=emitted_visible_output,
-        first_answer_preview=first_answer_preview,
-        first_reasoning_preview=first_reasoning_preview,
-        first_tool_call_preview=first_tool_call_preview,
+        stage_metrics=metrics.summary(),
     )
-    if request.tools:
-        log.info(
-            "[Runtime] finish=%s native_tool_calls=%s blocked=%s first_answer=%r first_reasoning=%r first_tool=%r answer_preview=%r",
-            state.finish_reason,
-            native_tool_calls,
-            state.blocked_tool_names,
-            state.first_answer_preview,
-            state.first_reasoning_preview,
-            state.first_tool_call_preview,
-            answer_text[:300],
-        )
     return RuntimeExecutionResult(state=state, chat_id=chat_id, acc=acc)
 
 
 def parse_tool_directive_once(request: StandardRequest, state: RuntimeAttemptState) -> RuntimeToolDirective:
-    if request.tools and state.answer_text:
-        tool_blocks, stop_reason = tool_parser.parse_tool_calls_silent(state.answer_text, request.tools)
-        return RuntimeToolDirective(tool_blocks=tool_blocks, stop_reason=stop_reason)
-
     if state.tool_calls:
         return RuntimeToolDirective(
             tool_blocks=[
@@ -407,6 +377,10 @@ def parse_tool_directive_once(request: StandardRequest, state: RuntimeAttemptSta
             stop_reason="tool_use",
         )
 
+    if request.tools and state.answer_text:
+        tool_blocks, stop_reason = tool_parser.parse_tool_calls_silent(state.answer_text, request.tools)
+        return RuntimeToolDirective(tool_blocks=tool_blocks, stop_reason=stop_reason)
+
     return RuntimeToolDirective(tool_blocks=[{"type": "text", "text": state.answer_text}], stop_reason="end_turn")
 
 
@@ -414,35 +388,21 @@ def build_tool_directive(
     request: StandardRequest,
     state: RuntimeAttemptState,
 ) -> RuntimeToolDirective:
-    directive = parse_tool_directive_once(request, state)
-    if request.tools:
-        preview = [
-            {
-                "type": block.get("type"),
-                "id": block.get("id"),
-                "name": block.get("name"),
-                "input": block.get("input"),
-            }
-            for block in directive.tool_blocks[:3]
-        ]
-        log.info("[Runtime] directive stop_reason=%s blocks=%s", directive.stop_reason, preview)
-    return directive
+    return parse_tool_directive_once(request, state)
 
 
 def anthropic_stream_usage_delta(prompt: str, answer_text: str) -> int:
     return len(answer_text) + len(prompt)
 
 
-def anthropic_stream_stop_reason(request: StandardRequest, state: RuntimeAttemptState, pending_chunks: list[str], directive: RuntimeToolDirective | None = None) -> str:
-    del pending_chunks
-    if state.tool_calls:
+def anthropic_stream_stop_reason(request: StandardRequest, state: RuntimeAttemptState, pending_chunks: list[str]) -> str:
+    if state.tool_calls or any('"type": "tool_use"' in chunk for chunk in pending_chunks):
         return "tool_use"
-    resolved_directive = directive or build_tool_directive(request, state)
-    return resolved_directive.stop_reason
+    return build_tool_directive(request, state).stop_reason
 
 
-def finalize_anthropic_stream_success(*, request: StandardRequest, prompt: str, execution: RuntimeExecutionResult, translator, directive: RuntimeToolDirective | None = None) -> AnthropicStreamSuccessResult:
-    stop_reason = anthropic_stream_stop_reason(request, execution.state, translator.pending_chunks, directive)
+def finalize_anthropic_stream_success(*, request: StandardRequest, prompt: str, execution: RuntimeExecutionResult, translator) -> AnthropicStreamSuccessResult:
+    stop_reason = anthropic_stream_stop_reason(request, execution.state, translator.pending_chunks)
     chunks = translator.finalize(answer_text=execution.state.answer_text, stop_reason=stop_reason)
     return AnthropicStreamSuccessResult(
         chunks=chunks,
@@ -451,18 +411,15 @@ def finalize_anthropic_stream_success(*, request: StandardRequest, prompt: str, 
 
 
 async def complete_anthropic_stream_success(*, users_db, token: str, client, prompt: str, request: StandardRequest, execution: RuntimeExecutionResult, translator) -> AnthropicStreamCompletionResult:
+    from backend.services.auth_quota import add_used_tokens
+
     stream_success = finalize_anthropic_stream_success(
         request=request,
         prompt=prompt,
         execution=execution,
         translator=translator,
     )
-    users = await users_db.get()
-    for u in users:
-        if u["id"] == token:
-            u["used_tokens"] += stream_success.usage_delta
-            break
-    await users_db.save(users)
+    await add_used_tokens(users_db, token, stream_success.usage_delta)
     await cleanup_runtime_resources(client, execution.acc, execution.chat_id)
     return AnthropicStreamCompletionResult(chunks=stream_success.chunks)
 
@@ -474,8 +431,8 @@ def inject_assistant_message(prompt: str, message: str) -> str:
     return next_prompt + "\n\n" + message + "\nAssistant:"
 
 
-def build_usage_delta_factory(prompt: str) -> Callable[[RuntimeExecutionResult, Any | None], int]:
-    return lambda execution, _=None: len(execution.state.answer_text) + len(prompt)
+def retryable_usage_delta(prompt: str):
+    return lambda execution, _: len(execution.state.answer_text) + len(prompt)
 
 
 def plan_runtime_attempts(request: StandardRequest, *, initial_prompt: str) -> RuntimeAttemptPlan:
@@ -500,58 +457,22 @@ def evaluate_retry_directive(
     state: RuntimeAttemptState,
     allow_after_visible_output: bool = False,
 ) -> RuntimeRetryDirective:
-    typed_request = cast(StandardRequest, request)
     if attempt_index >= max_attempts - 1:
         return RuntimeRetryDirective(retry=False, next_prompt=current_prompt)
 
-    if state.blocked_tool_names and typed_request.tools:
-        blocked_name = normalize_tool_name_for_retry(state.blocked_tool_names[0], typed_request.tool_names)
-        force_text = (
-            f"[MANDATORY NEXT STEP]: The server blocked tool '{blocked_name}' with 'Tool {blocked_name} does not exists.'. "
-            "Retry immediately using ONLY ##TOOL_CALL## format and nothing else:\n"
-            "##TOOL_CALL##\n"
-            f'{{"name": {json.dumps(blocked_name)}, "input": {{...your args here...}}}}\n'
-            "##END_CALL##\n"
-            "DO NOT use bare JSON. DO NOT use any XML tags. DO NOT add prose before or after the wrapper."
-        )
+    if state.blocked_tool_names and request.tools:
         if state.emitted_visible_output and not allow_after_visible_output:
-            next_prompt = inject_assistant_message(current_prompt, force_text)
-            return RuntimeRetryDirective(retry=True, next_prompt=next_prompt)
+            return RuntimeRetryDirective(retry=False, next_prompt=current_prompt)
+        blocked_name = normalize_tool_name(state.blocked_tool_names[0], request.tool_names)
         return RuntimeRetryDirective(
             retry=True,
-            next_prompt=tool_parser.inject_format_reminder(
-                current_prompt,
-                blocked_name,
-            ),
+            next_prompt=tool_parser.inject_format_reminder(current_prompt, blocked_name),
         )
 
-    if typed_request.tools and state.answer_text:
-        directive = parse_tool_directive_once(typed_request, state)
+    if request.tools and state.answer_text:
+        directive = parse_tool_directive_once(request, state)
         if directive.stop_reason == "tool_use":
             first_tool = next((b for b in directive.tool_blocks if b.get("type") == "tool_use"), None)
-            if first_tool:
-                repeated_same_tool = False
-                if getattr(typed_request, "client_profile", "openclaw_openai") == "openclaw_openai":
-                    repeated_same_tool = has_recent_openai_same_tool_call(
-                        history_messages,
-                        first_tool.get("name", ""),
-                        first_tool.get("input", {}),
-                    )
-                else:
-                    repeated_same_tool = recent_same_tool_identity_count(
-                        history_messages,
-                        first_tool.get("name", ""),
-                        first_tool.get("input", {}),
-                    ) >= 1
-                if repeated_same_tool and not state.emitted_visible_output:
-                    force_text = (
-                        f"[MANDATORY NEXT STEP]: You already called {first_tool.get('name')} with the same input. "
-                        "Do NOT repeat the same tool call. "
-                        "Use the tool result you already have and either choose the next relevant tool or finish the task. "
-                        "If this is a config-file task, read once and then edit/write the file instead of rereading it."
-                    )
-                    next_prompt = inject_assistant_message(current_prompt, force_text)
-                    return RuntimeRetryDirective(retry=True, next_prompt=next_prompt)
             if (
                 first_tool
                 and first_tool.get("name") == "Read"
@@ -563,12 +484,7 @@ def evaluate_retry_directive(
                     "Do NOT call Read again on the same target. "
                     "Choose another tool now."
                 )
-                next_prompt = current_prompt.rstrip()
-                if next_prompt.endswith("Assistant:"):
-                    next_prompt = next_prompt[:-len("Assistant:")] + force_text + "\nAssistant:"
-                else:
-                    next_prompt += "\n\n" + force_text + "\nAssistant:"
-                return RuntimeRetryDirective(retry=True, next_prompt=next_prompt)
+                return RuntimeRetryDirective(retry=True, next_prompt=inject_assistant_message(current_prompt, force_text))
 
             if (
                 first_tool
@@ -581,14 +497,17 @@ def evaluate_retry_directive(
                     "Do NOT call WebSearch again with similar wording. "
                     "Use another tool or finish with the best available answer."
                 )
-                next_prompt = current_prompt.rstrip()
-                if next_prompt.endswith("Assistant:"):
-                    next_prompt = next_prompt[:-len("Assistant:")] + force_text + "\nAssistant:"
-                else:
-                    next_prompt += "\n\n" + force_text + "\nAssistant:"
-                return RuntimeRetryDirective(retry=True, next_prompt=next_prompt)
+                return RuntimeRetryDirective(retry=True, next_prompt=inject_assistant_message(current_prompt, force_text))
 
     return RuntimeRetryDirective(retry=False, next_prompt=current_prompt)
+
+
+async def continue_after_retry_directive(*, client, execution, retry: RuntimeRetryDirective) -> RuntimeRetryContinuation:
+    if not retry.retry:
+        return RuntimeRetryContinuation(should_continue=False, next_prompt=retry.next_prompt)
+    await cleanup_runtime_resources(client, execution.acc, execution.chat_id)
+    await asyncio.sleep(0.15)
+    return RuntimeRetryContinuation(should_continue=True, next_prompt=retry.next_prompt)
 
 
 async def cleanup_runtime_resources(client, acc, chat_id: str | None) -> None:
