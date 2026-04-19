@@ -200,7 +200,7 @@ def build_continuation_prompt(
         '- Do NOT ask questions or wait - execute the task directly',
         '- Continue from where you left off based on the tool results',
         '',
-        'Do not repeat the same Read/Bash/WebSearch call if the result is already available in this chat.',
+        'Do not repeat the same Read/read_file, Bash/run_shell_command, list_directory/Glob, or WebSearch call if the result is already available in this chat.',
         '',
         'NEW ITEMS:',
     ]
@@ -228,10 +228,30 @@ def build_retry_rebase_prompt(request: StandardRequest, *, reason: str | None = 
                 f'[MANDATORY NEXT STEP]: You already called {tool_name} with the same input. '
                 'Do NOT repeat it. Use the existing result and move to the next relevant step or finish the task.'
             )
+        elif reason.startswith('repeated_same_read:'):
+            tool_name = reason.split(':', 1)[1] or 'Read'
+            guidance = (
+                f'[MANDATORY NEXT STEP]: You are stuck rereading the same file with {tool_name}. '
+                'Do NOT call Read/read_file on that same target again. Use the current file content and move forward to edit, write, verify, or finish.'
+            )
+        elif reason.startswith('blocked_tool_name:'):
+            tool_name = reason.split(':', 1)[1] or 'the requested tool'
+            guidance = (
+                f'[MANDATORY NEXT STEP]: Your last attempt used the wrong tool-call syntax for {tool_name}. '
+                'Use the exact tool contract for this gateway and call that tool again using the correct wrapper only.'
+            )
+        elif reason.startswith('exploration_loop:'):
+            parts = reason.split(':')
+            tool_name = parts[1] if len(parts) > 1 and parts[1] else 'an exploration tool'
+            count_text = parts[2] if len(parts) > 2 and parts[2] else 'multiple'
+            guidance = (
+                f'[MANDATORY NEXT STEP]: You are in an exploration loop ({count_text} exploratory calls in a row, latest: {tool_name}). '
+                'Stop browsing directories or rereading files. Use the results already in history and force progress to the concrete target file, edit/write step, real command execution, or final answer.'
+            )
         elif reason == 'unchanged_read_result':
             guidance = (
                 "[MANDATORY NEXT STEP]: You already received 'Unchanged since last read'. "
-                'Do NOT call Read again on the same target. Use the current result and choose a different next action.'
+                'Do NOT call Read again on the same target. Use the current file content and move to edit, write, verify, or a final answer.'
             )
         elif reason == 'search_no_results':
             guidance = (

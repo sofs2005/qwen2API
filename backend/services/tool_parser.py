@@ -17,6 +17,75 @@ log = logging.getLogger("qwen2api.tool_parser")
 CASE_SENSITIVE_TOOL_NAMES = {"Bash", "Edit", "Write", "Read", "Grep", "Glob", "WebFetch", "WebSearch"}
 
 
+def _tool_name(tool: dict[str, Any]) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    if isinstance(tool.get("name"), str) and tool.get("name", "").strip():
+        return tool.get("name", "").strip()
+    function_block = tool.get("function", {})
+    if isinstance(function_block, dict):
+        return str(function_block.get("name", "")).strip()
+    return ""
+
+
+def _find_tool_definition(name: str, tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+    normalized = str(name or "").strip().lower()
+    for tool in tools or []:
+        candidate = _tool_name(tool).lower()
+        if candidate == normalized:
+            return tool
+    return None
+
+
+def _tool_properties(tool: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(tool, dict):
+        return {}
+    params = tool.get("parameters", {}) or {}
+    if not params and isinstance(tool.get("function"), dict):
+        params = tool["function"].get("parameters", {}) or {}
+    if not isinstance(params, dict):
+        return {}
+    props = params.get("properties", {}) or {}
+    return props if isinstance(props, dict) else {}
+
+
+def _pick_declared_key(props: dict[str, Any], aliases: list[str], fallback: str) -> str:
+    if not props:
+        return fallback
+
+    alias_lookup = {re.sub(r"[^a-z0-9]+", "", alias.lower()): alias for alias in aliases}
+    for declared_key in props:
+        normalized_declared = re.sub(r"[^a-z0-9]+", "", declared_key.lower())
+        if normalized_declared in alias_lookup:
+            return declared_key
+    return fallback
+
+
+def _move_alias_value(payload: dict[str, Any], target_key: str, aliases: list[str]) -> None:
+    if target_key in payload and str(payload.get(target_key, "")).strip():
+        return
+    for alias in aliases:
+        if alias == target_key:
+            continue
+        value = payload.get(alias)
+        if isinstance(value, str) and value.strip():
+            payload[target_key] = payload.pop(alias).strip()
+            return
+
+
+def _set_default_string(payload: dict[str, Any], target_key: str, value: str) -> None:
+    if target_key not in payload or not str(payload.get(target_key, "")).strip():
+        payload[target_key] = value
+
+
+def _first_non_empty_string(payload: dict[str, Any], aliases: list[str]) -> str:
+    for alias in aliases:
+        value = payload.get(alias)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _normalize_tool_name_case(name: str, tool_names: set[str]) -> str:
     if not isinstance(name, str) or not name:
         return name
@@ -158,94 +227,138 @@ def _normalize_fragmented_tool_call(answer: str) -> str:
     return normalized
 
 
-def _coerce_tool_input(name: str, input_data: Any, tools: list[dict[str, Any]]) -> Any:
-    if not isinstance(input_data, dict):
-        return input_data
+def _iter_hash_tool_call_matches(answer: str) -> list[re.Match[str]]:
+    return list(re.finditer(r'##TOOL_CALL##\s*(.*?)\s*##END_CALL##', answer, re.DOTALL | re.IGNORECASE))
 
-    # 修正 AskUserQuestion 工具参数
-    if name == "AskUserQuestion":
-        fixed = dict(input_data)
 
-        # 如果只有 question 字段，转换为 questions 数组
-        if "question" in fixed and "questions" not in fixed:
-            question_text = fixed.pop("question")
-            fixed["questions"] = [{
-                "question": question_text,
-                "header": "Question",
-                "options": [
-                    {"label": "Yes", "description": "Confirm"},
-                    {"label": "No", "description": "Decline"}
-                ],
-                "multiSelect": False
-            }]
-            log.info(f"[ToolCoerce] Fixed AskUserQuestion: converted 'question' to 'questions' array")
+def _coerce_ask_user_question_input(input_data: dict[str, Any], _props: dict[str, Any]) -> dict[str, Any]:
+    fixed = dict(input_data)
 
-        # 确保 questions 是数组
-        if "questions" in fixed:
-            if not isinstance(fixed["questions"], list):
-                fixed["questions"] = [fixed["questions"]]
+    if "question" in fixed and "questions" not in fixed:
+        question_text = fixed.pop("question")
+        fixed["questions"] = [{
+            "question": question_text,
+            "header": "Question",
+            "options": [
+                {"label": "Yes", "description": "Confirm"},
+                {"label": "No", "description": "Decline"}
+            ],
+            "multiSelect": False
+        }]
+        log.info("[ToolCoerce] Fixed AskUserQuestion: converted 'question' to 'questions' array")
 
-            # 验证每个问题的格式
-            for i, q in enumerate(fixed["questions"]):
-                if not isinstance(q, dict):
-                    continue
+    if "questions" in fixed:
+        if not isinstance(fixed["questions"], list):
+            fixed["questions"] = [fixed["questions"]]
 
-                # 确保有必需字段
-                if "question" not in q:
-                    q["question"] = "Please provide your input"
-                if "header" not in q:
-                    q["header"] = "Question"
-                if "multiSelect" not in q:
-                    q["multiSelect"] = False
+        for j, question in enumerate(fixed["questions"]):
+            if not isinstance(question, dict):
+                continue
+            if "question" not in question:
+                question["question"] = "Please provide your input"
+            if "header" not in question:
+                question["header"] = "Question"
+            if "multiSelect" not in question:
+                question["multiSelect"] = False
+            if "options" not in question:
+                question["options"] = [
+                    {"label": "Continue", "description": "Proceed"},
+                    {"label": "Cancel", "description": "Stop"},
+                ]
+            elif isinstance(question.get("options"), list):
+                for i, opt in enumerate(question["options"]):
+                    if isinstance(opt, str):
+                        question["options"][i] = {"label": opt, "description": opt}
+                    elif isinstance(opt, dict):
+                        if "label" not in opt:
+                            opt["label"] = opt.get("description", f"Option {j + 1}")
+                        if "description" not in opt:
+                            opt["description"] = opt.get("label", "")
+    return fixed
 
-                # 确保 options 格式正确
-                if "options" not in q:
-                    q["options"] = [
-                        {"label": "Continue", "description": "Proceed"},
-                        {"label": "Cancel", "description": "Stop"}
-                    ]
-                elif isinstance(q.get("options"), list):
-                    for j, opt in enumerate(q["options"]):
-                        if isinstance(opt, str):
-                            q["options"][j] = {"label": opt, "description": opt}
-                        elif isinstance(opt, dict):
-                            if "label" not in opt:
-                                opt["label"] = opt.get("description", f"Option {j+1}")
-                            if "description" not in opt:
-                                opt["description"] = opt.get("label", "")
 
-        return fixed
+def _coerce_agent_input(input_data: dict[str, Any], _props: dict[str, Any]) -> dict[str, Any]:
+    fixed = dict(input_data)
+    if "description" not in fixed:
+        fixed["description"] = "Execute sub-task"
+    if "prompt" not in fixed:
+        fixed["prompt"] = fixed.get("description", "Execute the task")
+    return fixed
 
-    # 修正 Agent 工具参数
-    if name == "Agent":
-        fixed = dict(input_data)
-        if "description" not in fixed:
-            fixed["description"] = "Execute sub-task"
-        if "prompt" not in fixed:
-            fixed["prompt"] = fixed.get("description", "Execute the task")
-        return fixed
 
-    # 修正 Read 工具参数
-    if name == "Read":
-        fixed = dict(input_data)
-        if "file_path" not in fixed:
-            if "path" in fixed:
-                fixed["file_path"] = fixed.pop("path")
-            elif "filename" in fixed:
-                fixed["file_path"] = fixed.pop("filename")
-        return fixed
+def _coerce_read_input(input_data: dict[str, Any], props: dict[str, Any]) -> dict[str, Any]:
+    fixed = dict(input_data)
+    target_key = _pick_declared_key(props, ["file_path", "filePath", "path", "filename"], "file_path")
+    _move_alias_value(fixed, target_key, ["file_path", "filePath", "path", "filename", "value"])
+    return fixed
 
-    # 修正 Bash 工具参数
-    if name == "Bash":
-        fixed = dict(input_data)
-        if "command" not in fixed:
-            if "cmd" in fixed:
-                fixed["command"] = fixed.pop("cmd")
-            elif "script" in fixed:
-                fixed["command"] = fixed.pop("script")
-        return fixed
 
-    # 原有的 query/queries 转换逻辑
+def _coerce_shell_input(input_data: dict[str, Any], props: dict[str, Any]) -> dict[str, Any]:
+    fixed = dict(input_data)
+    command_key = _pick_declared_key(props, ["command", "cmd", "script", "value"], "command")
+    workdir_key = _pick_declared_key(props, ["workdir", "cwd", "path", "directory"], "workdir")
+    description_key = _pick_declared_key(props, ["description", "summary", "purpose"], "description")
+
+    _move_alias_value(fixed, command_key, ["command", "cmd", "script", "value"])
+    _move_alias_value(fixed, workdir_key, ["workdir", "cwd", "path", "directory"])
+
+    command_preview = _first_non_empty_string(fixed, [command_key, "command", "cmd", "script", "value"])
+    if description_key in props or "description" in fixed:
+        _set_default_string(
+            fixed,
+            description_key,
+            command_preview[:120] if command_preview else "Execute shell command",
+        )
+    return fixed
+
+
+def _coerce_search_files_input(input_data: dict[str, Any], _props: dict[str, Any]) -> dict[str, Any]:
+    fixed = dict(input_data)
+    if "path" not in fixed:
+        for key in ("directory", "dir", "cwd"):
+            if isinstance(fixed.get(key), str) and fixed[key].strip():
+                fixed["path"] = fixed.pop(key).strip()
+                break
+
+    if "pattern" not in fixed:
+        for key in ("glob", "file_glob", "value"):
+            if isinstance(fixed.get(key), str) and fixed[key].strip():
+                fixed["pattern"] = fixed.pop(key).strip()
+                break
+
+    pattern = fixed.get("pattern")
+    if isinstance(pattern, str):
+        stripped_pattern = pattern.strip()
+        if stripped_pattern:
+            fixed["pattern"] = stripped_pattern
+            if "target" not in fixed and any(ch in stripped_pattern for ch in ("*", "?", "[")):
+                fixed["target"] = "files"
+
+    if "pattern" not in fixed:
+        fixed["pattern"] = "*"
+    return fixed
+
+
+TOOL_INPUT_COERCERS_BY_NAME = {
+    "AskUserQuestion": _coerce_ask_user_question_input,
+    "Agent": _coerce_agent_input,
+}
+
+
+TOOL_INPUT_COERCERS_BY_NORMALIZED_NAME = {
+    "read": _coerce_read_input,
+    "bash": _coerce_shell_input,
+    "execcommand": _coerce_shell_input,
+    "exec_command": _coerce_shell_input,
+    "shellcommand": _coerce_shell_input,
+    "shell_command": _coerce_shell_input,
+    "runshellcommand": _coerce_shell_input,
+    "run_shell_command": _coerce_shell_input,
+    "search_files": _coerce_search_files_input,
+}
+
+
+def _coerce_query_aliases(input_data: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
     query_value = input_data.get("query")
     queries = input_data.get("queries")
     if query_value or "queries" not in input_data:
@@ -269,6 +382,22 @@ def _coerce_tool_input(name: str, input_data: Any, tools: list[dict[str, Any]]) 
     return input_data
 
 
+def _coerce_tool_input(name: str, input_data: Any, tools: list[dict[str, Any]]) -> Any:
+    if not isinstance(input_data, dict):
+        return input_data
+
+    tool_def = _find_tool_definition(name, tools)
+    props = _tool_properties(tool_def)
+    normalized_name = str(name or "").strip().lower()
+
+    fixed = dict(input_data)
+    coercer = TOOL_INPUT_COERCERS_BY_NAME.get(name) or TOOL_INPUT_COERCERS_BY_NORMALIZED_NAME.get(normalized_name)
+    if coercer is not None:
+        fixed = coercer(fixed, props)
+
+    return _coerce_query_aliases(fixed, tools)
+
+
 def parse_tool_calls(answer: str, tools: list):
     return _parse_tool_calls(answer, tools, emit_logs=True)
 
@@ -283,7 +412,7 @@ def _parse_tool_calls(answer: str, tools: list, *, emit_logs: bool):
     req_tag = f"req={ctx.get('req_id', '-')} chat={ctx.get('chat_id', '-')}"
     if not tools:
         return [{"type": "text", "text": answer}], "end_turn"
-    tool_names = {t.get("name") for t in tools if t.get("name")}
+    tool_names = {_tool_name(t) for t in tools if _tool_name(t)}
     tool_registry = build_tool_name_registry(tool_names)
 
     def _log_debug(message: str) -> None:
@@ -301,19 +430,26 @@ def _parse_tool_calls(answer: str, tools: list, *, emit_logs: bool):
     # 强制记录原始输入用于调试
     log.info(f"[ToolParse] [{req_tag}] 原始回复({len(answer)}字): {answer[:500]!r}")
 
-    def _make_tool_block(name, input_data, prefix=""):
+    def _build_tool_use_block(name, input_data):
         normalized_name = normalize_tool_name(name, tool_registry.values())
         cased_name = _normalize_tool_name_case(normalized_name, tool_names)
         if cased_name not in tool_names:
-            _log_warning(f"[ToolParse] 工具名不匹配，回退为普通文本: name={name!r}, normalized={normalized_name!r}, cased={cased_name!r}, tools={tool_names}")
-            return [{"type": "text", "text": answer}], "end_turn"
+            _log_warning(f"[ToolParse] 工具名不匹配: name={name!r}, normalized={normalized_name!r}, cased={cased_name!r}, tools={tool_names}")
+            return None
         coerced_input = _coerce_tool_input(cased_name, input_data, tools)
         tool_id = f"toolu_{uuid.uuid4().hex[:8]}"
+        return {"type": "tool_use", "id": tool_id, "name": cased_name, "input": coerced_input}
+
+    def _make_tool_block(name, input_data, prefix=""):
+        tool_block = _build_tool_use_block(name, input_data)
+        if tool_block is None:
+            _log_warning(f"[ToolParse] 工具名不匹配，回退为普通文本: name={name!r}, tools={tool_names}")
+            return [{"type": "text", "text": answer}], "end_turn"
         blocks = []
         if prefix:
             blocks.append({"type": "text", "text": prefix})
-        blocks.append({"type": "tool_use", "id": tool_id, "name": cased_name, "input": coerced_input})
-        _log_info(f"[ToolParse] 返回工具块: original={name!r}, normalized={normalized_name!r}, final={cased_name!r}, input={json.dumps(coerced_input, ensure_ascii=False)[:200]}")
+        blocks.append(tool_block)
+        _log_info(f"[ToolParse] 返回工具块: original={name!r}, final={tool_block['name']!r}, input={json.dumps(tool_block['input'], ensure_ascii=False)[:200]}")
         return blocks, "tool_use"
 
     detailed = parse_tool_calls_detailed(answer, tool_names)
@@ -323,22 +459,45 @@ def _parse_tool_calls(answer: str, tools: list, *, emit_logs: bool):
         _log_info(f"[ToolParse] ✓ 详细解析格式: source={detailed['source']}, name={first_call['name']!r}, input={json.dumps(first_call['input'], ensure_ascii=False)[:200]}")
         return _make_tool_block(first_call["name"], first_call["input"])
 
-    tc_m = re.search(r'##TOOL_CALL##\s*(.*?)\s*##END_CALL##', answer, re.DOTALL | re.IGNORECASE)
-    if tc_m:
-        try:
-            obj = json.loads(tc_m.group(1))
-            name = obj.get("name", "")
-            inp = obj.get("input", obj.get("args", obj.get("arguments", obj.get("parameters", {}))))
-            if isinstance(inp, str):
-                try:
-                    inp = json.loads(inp)
-                except Exception:
-                    inp = {"value": inp}
-            prefix = answer[:tc_m.start()].strip()
-            _log_info(f"[ToolParse] ✓ ##TOOL_CALL## 格式: name={name!r}, input={str(inp)[:120]}")
-            return _make_tool_block(name, inp, prefix)
-        except (json.JSONDecodeError, ValueError) as e:
-            _log_warning(f"[ToolParse] ##TOOL_CALL## 格式解析失败: {e}, content={tc_m.group(1)[:100]!r}")
+    tc_matches = _iter_hash_tool_call_matches(answer)
+    if tc_matches:
+        seq_blocks: list[dict[str, Any]] = []
+        cursor = 0
+        valid_tool_count = 0
+
+        for tc_m in tc_matches:
+            prefix = answer[cursor:tc_m.start()].strip()
+            if prefix:
+                seq_blocks.append({"type": "text", "text": prefix})
+
+            try:
+                obj = json.loads(tc_m.group(1))
+                name = obj.get("name", "")
+                inp = obj.get("input", obj.get("args", obj.get("arguments", obj.get("parameters", {}))))
+                if isinstance(inp, str):
+                    try:
+                        inp = json.loads(inp)
+                    except Exception:
+                        inp = {"value": inp}
+                tool_block = _build_tool_use_block(name, inp)
+                if tool_block is not None:
+                    valid_tool_count += 1
+                    seq_blocks.append(tool_block)
+                    _log_info(f"[ToolParse] ✓ ##TOOL_CALL## 格式: name={name!r}, input={str(inp)[:120]}")
+                else:
+                    seq_blocks.append({"type": "text", "text": answer[tc_m.start():tc_m.end()].strip()})
+            except (json.JSONDecodeError, ValueError) as e:
+                _log_warning(f"[ToolParse] ##TOOL_CALL## 格式解析失败: {e}, content={tc_m.group(1)[:100]!r}")
+                seq_blocks.append({"type": "text", "text": answer[tc_m.start():tc_m.end()].strip()})
+
+            cursor = tc_m.end()
+
+        suffix = answer[cursor:].strip()
+        if suffix:
+            seq_blocks.append({"type": "text", "text": suffix})
+
+        if valid_tool_count:
+            return seq_blocks, "tool_use"
 
     xml_m = re.search(r'<tool_call>\s*(.*?)\s*</tool_call>', answer, re.DOTALL | re.IGNORECASE)
     if xml_m:
@@ -472,6 +631,18 @@ class ToolSieve:
             self.capture = self.pending[start:]
             self.pending = ""
             self.capturing = True
+            capture_prefix, calls, suffix, ready = self._consume_tool_capture()
+            if ready and calls:
+                if capture_prefix:
+                    events.append({"type": "content", "text": capture_prefix})
+                self.pending_tool_calls = calls
+                self.tool_calls_detected = True
+                self.pending = suffix
+                self.capture = ""
+                self.capturing = False
+                if self.pending_tool_calls:
+                    events.append({"type": "tool_calls", "calls": self.pending_tool_calls})
+                    self.pending_tool_calls = []
         else:
             # 没找到，输出安全部分
             safe, hold = self._split_safe_content(self.pending)
@@ -483,16 +654,18 @@ class ToolSieve:
 
     def _find_tool_start(self, text: str) -> int:
         """查找工具调用开始位置"""
+        lowered = text.lower()
         markers = [
             '{"name":',
             '<tool_call>',
-            '##TOOL_CALL##',
+            '##tool_call##',
+            'tool_call##',
             'function.name:',
         ]
 
         positions = []
         for marker in markers:
-            pos = text.find(marker)
+            pos = lowered.find(marker)
             if pos >= 0:
                 positions.append(pos)
 
@@ -568,8 +741,9 @@ class ToolSieve:
 
     def _looks_like_incomplete_tool_call(self, text: str) -> bool:
         """检查文本是否看起来像不完整的工具调用"""
-        markers = ['{"name":', '<tool_call>', '##TOOL_CALL##', 'function.name:']
-        return any(marker in text for marker in markers)
+        lowered = text.lower()
+        markers = ['{"name":', '<tool_call>', '##tool_call##', 'tool_call##', 'function.name:']
+        return any(marker in lowered for marker in markers)
 
     def has_tool_calls(self) -> bool:
         """是否检测到工具调用"""
@@ -615,5 +789,3 @@ def inject_format_reminder(prompt: str, tool_name: str, *, client_profile: str =
     if prompt.endswith("Assistant:"):
         return prompt[: -len("Assistant:")] + reminder + "\nAssistant:"
     return prompt + "\n\n" + reminder + "\nAssistant:"
-
-

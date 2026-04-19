@@ -4,9 +4,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.runtime.attachment_types import NormalizedAttachment
-
-CLAUDE_CODE_OPENAI_PROFILE = "claude_code_openai"
-OPENCLAW_OPENAI_PROFILE = "openclaw_openai"
+from backend.services.client_profiles import (
+    CLAUDE_CODE_OPENAI_PROFILE,
+    OPENCLAW_OPENAI_PROFILE,
+    QWEN_CODE_OPENAI_PROFILE,
+    detect_openai_client_profile,
+    is_qwen_code_openai_request,
+)
 
 
 @dataclass(slots=True)

@@ -20,9 +20,10 @@ from backend.core.request_logging import configure_logging, request_context
 from backend.services.qwen_client import QwenClient
 from backend.services.file_store import LocalFileStore
 from backend.services.context_offload import ContextOffloader
+from backend.services.response_store import InMemoryResponseStore
 from backend.services.upstream_file_uploader import UpstreamFileUploader
 import backend.api.models as models
-from backend.api import admin, v1_chat, probes, anthropic, gemini, embeddings, images, files_api
+from backend.api import admin, v1_chat, responses_api, probes, anthropic, gemini, embeddings, images, files_api
 from backend.services.garbage_collector import garbage_collect_chats
 from backend.services.context_cleanup import context_cleanup_loop
 
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
         app.state.context_offloader = ContextOffloader(settings)
         app.state.upstream_file_uploader = UpstreamFileUploader(app.state.qwen_client, settings)
         app.state.session_locks = SessionLockRegistry()
+        app.state.response_store = InMemoryResponseStore()
 
         # 加载账号并启动后台清理任务
         await app.state.account_pool.load()
@@ -78,6 +80,7 @@ app.add_middleware(
 
 # 挂载路由
 app.include_router(v1_chat.router, tags=["OpenAI Compatible"])
+app.include_router(responses_api.router, tags=["Responses Compatible"])
 app.include_router(models.router, tags=["Models"])
 app.include_router(anthropic.router, tags=["Claude Compatible"])
 app.include_router(gemini.router, tags=["Gemini Compatible"])

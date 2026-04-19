@@ -1,14 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from backend.adapter.standard_request import StandardRequest
-from backend.runtime.execution import build_tool_directive, cleanup_runtime_resources, collect_completion_run, evaluate_retry_directive
+from backend.runtime.execution import (
+    RuntimeToolDirective,
+    build_tool_directive,
+    cleanup_runtime_resources,
+    collect_completion_run,
+    detect_terminal_tool_loop,
+    evaluate_retry_directive,
+)
 from backend.services.auth_quota import add_used_tokens
 from backend.services.task_session import build_retry_rebase_prompt
 from backend.services.token_calc import calculate_usage
+from backend.toolcall.runtime_tools import (
+    is_list_directory_tool_name,
+    is_read_tool_name,
+    is_shell_tool_name,
+    parse_tool_call_arguments,
+    tool_target_preview,
+)
 
 
 @dataclass(slots=True)
@@ -18,6 +33,107 @@ class CompletionBridgeResult:
     prompt: str
     attempt_index: int
     directive: Any | None = None
+
+
+def _truncate_preview(text: str, limit: int = 220) -> str:
+    compact = " ".join(str(text or "").split())
+    return compact[:limit] + ("..." if len(compact) > limit else "")
+
+
+def _build_terminal_tool_guard_message(loop_message: str, history_messages: list[dict[str, Any]] | None) -> str:
+    tool_calls_by_id: dict[str, tuple[str, dict[str, Any]]] = {}
+    seen_reads: list[str] = []
+    seen_exploration: list[str] = []
+    result_summaries: list[str] = []
+
+    for msg in history_messages or []:
+        if msg.get("role") == "assistant":
+            for tool_call in msg.get("tool_calls", []) or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = str(tool_call.get("id", "") or "")
+                fn = tool_call.get("function", {}) if isinstance(tool_call.get("function"), dict) else {}
+                tool_name = str(fn.get("name", "") or "")
+                args = parse_tool_call_arguments(tool_call)
+                if call_id:
+                    tool_calls_by_id[call_id] = (tool_name, args)
+                target = tool_target_preview(tool_name, args)
+                if target and is_read_tool_name(tool_name) and target not in seen_reads:
+                    seen_reads.append(target)
+                elif target and (is_list_directory_tool_name(tool_name) or is_shell_tool_name(tool_name)) and target not in seen_exploration:
+                    seen_exploration.append(target)
+        elif msg.get("role") == "tool":
+            call_id = str(msg.get("tool_call_id", "") or "")
+            call_info = tool_calls_by_id.get(call_id)
+            if not call_info:
+                continue
+            tool_name, args = call_info
+            target = tool_target_preview(tool_name, args)
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            preview = _truncate_preview(content)
+            if preview:
+                label = f"{tool_name}({target})" if target else tool_name
+                summary = f"- {label}: {preview}"
+                if summary not in result_summaries:
+                    result_summaries.append(summary)
+
+    lines = [loop_message]
+    if seen_reads:
+        lines.append("")
+        lines.append("Already inspected file targets:")
+        lines.extend(f"- {target}" for target in seen_reads[:6])
+    if seen_exploration:
+        lines.append("")
+        lines.append("Recent exploration targets:")
+        lines.extend(f"- {target}" for target in seen_exploration[:6])
+    if result_summaries:
+        lines.append("")
+        lines.append("Recent tool result previews:")
+        lines.extend(result_summaries[:4])
+    lines.append("")
+    lines.append("Suggested next step: continue from the existing tool results, identify the target file to edit, and write the improved script directly instead of calling the same discovery tool again.")
+    return "\n".join(lines)
+
+
+def _apply_terminal_tool_guard(*, execution: Any, directive: RuntimeToolDirective, history_messages: list[dict[str, Any]] | None) -> tuple[Any, RuntimeToolDirective]:
+    loop_message = detect_terminal_tool_loop(history_messages, directive)
+    if not loop_message:
+        return execution, directive
+    fallback_message = _build_terminal_tool_guard_message(loop_message, history_messages)
+
+    if dataclasses.is_dataclass(execution.state):
+        patched_state = dataclasses.replace(
+            execution.state,
+            answer_text=fallback_message,
+            reasoning_text="",
+            tool_calls=[],
+            blocked_tool_names=[],
+            finish_reason="stop",
+        )
+    else:
+        patched_state = execution.state
+        patched_state.answer_text = fallback_message
+        patched_state.reasoning_text = ""
+        patched_state.tool_calls = []
+        patched_state.blocked_tool_names = []
+        patched_state.finish_reason = "stop"
+
+    if dataclasses.is_dataclass(execution):
+        patched_execution = dataclasses.replace(execution, state=patched_state)
+    else:
+        patched_execution = execution
+        patched_execution.state = patched_state
+    patched_directive = RuntimeToolDirective(
+        tool_blocks=[{"type": "text", "text": fallback_message}],
+        stop_reason="end_turn",
+    )
+    return patched_execution, patched_directive
 
 
 async def _reacquire_bound_account_if_needed(*, client, standard_request: StandardRequest) -> None:
@@ -107,9 +223,14 @@ async def run_retryable_completion_bridge(
             await _reacquire_bound_account_if_needed(client=client, standard_request=standard_request)
             continue
 
+        directive = build_tool_directive(standard_request, execution.state)
+        execution, directive = _apply_terminal_tool_guard(
+            execution=execution,
+            directive=directive,
+            history_messages=history_messages,
+        )
         usage = calculate_usage(current_prompt, execution.state.answer_text)
         usage_delta = usage_delta_factory(execution, current_prompt) if usage_delta_factory is not None else usage["total_tokens"]
-        directive = build_tool_directive(standard_request, execution.state)
         await add_used_tokens(users_db, token, usage_delta)
         await cleanup_runtime_resources(
             client,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from backend.runtime.execution import build_tool_directive
@@ -55,6 +56,104 @@ def build_openai_completion_payload(*, completion_id: str, created: int, model_n
             "completion_tokens": len(execution.state.answer_text),
             "total_tokens": len(prompt) + len(execution.state.answer_text),
         },
+    }
+
+
+def build_openai_response_payload(
+    *,
+    response_id: str,
+    created: int,
+    model_name: str,
+    prompt: str,
+    execution,
+    standard_request,
+    previous_response_id: str | None = None,
+    store: bool = True,
+) -> dict[str, Any]:
+    directive = build_tool_directive(standard_request, execution.state)
+    answer_text = execution.state.answer_text or ""
+    output: list[dict[str, Any]] = []
+
+    if directive.stop_reason == "tool_use":
+        if answer_text:
+            output.append(
+                {
+                    "id": f"msg_{uuid.uuid4().hex[:24]}",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": answer_text,
+                            "annotations": [],
+                        }
+                    ],
+                }
+            )
+        for block in directive.tool_blocks:
+            if block.get("type") != "tool_use":
+                continue
+            output.append(
+                {
+                    "id": block["id"],
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": block["id"],
+                    "name": block["name"],
+                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                }
+            )
+    else:
+        output.append(
+            {
+                "id": f"msg_{uuid.uuid4().hex[:24]}",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": answer_text,
+                        "annotations": [],
+                    }
+                ],
+            }
+        )
+
+    usage = {
+        "input_tokens": len(prompt),
+        "output_tokens": len(answer_text),
+        "total_tokens": len(prompt) + len(answer_text),
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": len(execution.state.reasoning_text or "")},
+    }
+
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": created,
+        "status": "completed",
+        "error": None,
+        "incomplete_details": None,
+        "instructions": None,
+        "max_output_tokens": None,
+        "model": model_name,
+        "output": output,
+        "output_text": answer_text,
+        "parallel_tool_calls": False,
+        "previous_response_id": previous_response_id,
+        "reasoning": {"effort": None, "summary": None},
+        "store": store,
+        "temperature": 1.0,
+        "text": {"format": {"type": "text"}},
+        "tool_choice": "auto",
+        "tools": standard_request.tools or [],
+        "top_p": 1.0,
+        "truncation": "disabled",
+        "usage": usage,
+        "metadata": {},
+        "user": None,
     }
 
 

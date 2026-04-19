@@ -29,6 +29,9 @@ class Settings(BaseSettings):
 
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    QWEN_CODE_CODER_MODEL: str = os.getenv("QWEN_CODE_CODER_MODEL", "qwen3-coder-plus")
+    QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS: bool = os.getenv("QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS", "true").lower() in {"1", "true", "yes", "on"}
+    QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS: bool = os.getenv("QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS", "true").lower() in {"1", "true", "yes", "on"}
 
     # 数据文件路径
     ACCOUNTS_FILE: str = os.getenv("ACCOUNTS_FILE", str(DATA_DIR / "accounts.json"))
@@ -112,3 +115,70 @@ MODEL_MAP = {
 
 def resolve_model(name: str) -> str:
     return MODEL_MAP.get(name, name)
+
+
+GENERIC_QWEN_CODE_MODELS = {
+    "qwen3.6-plus",
+    "qwen-plus",
+    "qwen-max",
+    "qwen",
+}
+
+
+def resolve_qwen_code_model(name: str) -> str:
+    return resolve_model(settings.QWEN_CODE_CODER_MODEL or name)
+
+
+def _normalized_model_name(name: str | None) -> str:
+    return str(name or "").strip().lower()
+
+
+def _looks_like_coder_model(name: str | None) -> bool:
+    normalized = _normalized_model_name(name)
+    return "coder" in normalized or normalized.startswith("qwen-code")
+
+
+def _is_explicit_non_coder_model(name: str | None) -> bool:
+    normalized = _normalized_model_name(name)
+    return any(marker in normalized for marker in ("flash", "mini", "turbo"))
+
+
+def should_route_qwen_code_to_coder(
+    requested_model: str,
+    *,
+    client_profile: str,
+    tool_enabled: bool = False,
+    coding_intent: bool = False,
+) -> bool:
+    if client_profile != "qwen_code_openai":
+        return False
+    if _looks_like_coder_model(requested_model):
+        return False
+    resolved_model = resolve_model(requested_model)
+    if _looks_like_coder_model(resolved_model):
+        return False
+    if _is_explicit_non_coder_model(requested_model):
+        return False
+
+    if tool_enabled and settings.QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS and resolved_model in GENERIC_QWEN_CODE_MODELS:
+        return True
+    if coding_intent and settings.QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS and resolved_model in GENERIC_QWEN_CODE_MODELS:
+        return True
+    return False
+
+
+def resolve_request_model(
+    requested_model: str,
+    *,
+    client_profile: str,
+    tool_enabled: bool = False,
+    coding_intent: bool = False,
+) -> str:
+    if should_route_qwen_code_to_coder(
+        requested_model,
+        client_profile=client_profile,
+        tool_enabled=tool_enabled,
+        coding_intent=coding_intent,
+    ):
+        return resolve_qwen_code_model(requested_model)
+    return resolve_model(requested_model)

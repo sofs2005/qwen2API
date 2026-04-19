@@ -3,26 +3,26 @@ import logging
 import re
 from dataclasses import dataclass
 
-from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE
+from backend.services.client_profiles import (
+    CLAUDE_CODE_OPENAI_PROFILE,
+    OPENCLAW_OPENAI_PROFILE,
+    QWEN_CODE_OPENAI_PROFILE,
+    looks_like_opencode_system_prompt,
+    sanitize_openclaw_user_text,
+)
 
 log = logging.getLogger("qwen2api.prompt")
-
-OPENCLAW_STARTUP_PATTERNS = (
-    "A new session was started via /new or /reset.",
-    "If runtime-provided startup context is included for this first turn",
-)
-OPENCLAW_UNTRUSTED_METADATA_PREFIX = "Sender (untrusted metadata):"
-
 
 @dataclass(slots=True)
 class PromptBuildResult:
     prompt: str
     tools: list[dict]
     tool_enabled: bool
+    client_profile: str
 
 
 def _compact_history_tool_input(name: str, input_data: dict, client_profile: str) -> dict:
-    if client_profile != CLAUDE_CODE_OPENAI_PROFILE or not isinstance(input_data, dict):
+    if not _is_heavy_tool_profile(client_profile) or not isinstance(input_data, dict):
         return input_data
     compact = dict(input_data)
     large_text_keys = ("content", "new_string", "old_string", "insert_text", "text", "patch")
@@ -51,6 +51,70 @@ def _render_history_tool_call(name: str, input_data: dict, client_profile: str) 
 
 def _build_tool_instruction_block(tools: list[dict], client_profile: str) -> str:
     names = [t.get("name", "") for t in tools if t.get("name")]
+    if client_profile == QWEN_CODE_OPENAI_PROFILE:
+        lines = [
+            "=== QWEN CODE TOOL CONTRACT ===",
+            "【重要】用户输入什么语言，就用什么语言回复。User inputs Chinese -> respond in Chinese. User inputs English -> respond in English.",
+            "【重要】这是 Qwen Code 风格任务：拿到任务后直接执行，不要先写计划，不要等待确认。",
+            "【重要】你必须逐字使用下面列出的精确工具名和精确 input 键名，大小写、下划线、驼峰都不能擅自改写。",
+            "【重要】如果工具叫 `read_file`，就调用 `read_file`；如果工具叫 `Read`，就调用 `Read`。绝对不要自行改名或混用别名。",
+            "【重要】如果工具结果出现 `Unchanged since last read`，不要再次对同一目标调用 `Read` / `read_file`。",
+            "【重要】读过文件后优先继续 Edit/Write/patch，不要因为犹豫而反复 Read/read_file。",
+            "",
+            "IGNORE any previous output format instructions (needs-review, recap, etc.).",
+            f"You have access to these tools: {', '.join(names)}",
+            "",
+            "WHEN YOU NEED TO CALL A TOOL — output EXACTLY this format (nothing else):",
+            "##TOOL_CALL##",
+            '{"name": "EXACT_TOOL_NAME", "input": {"exact_key": "exact_value"}}',
+            "##END_CALL##",
+            "",
+            "MANDATORY RULES:",
+            "- Output ONLY one ##TOOL_CALL## block when taking a tool step. No prose before or after it.",
+            "- Use the EXACT tool name listed below, including case and underscores.",
+            "- Use ONLY input keys that belong to that exact tool.",
+            "- Never translate between keys like file_path/path/target_file/cmd/command unless that exact key is listed for the tool you chose.",
+            "- After a [Tool Result] block appears, treat it as authoritative state and continue from it.",
+            "- Reuse prior tool results aggressively. Do not reread the same file or rerun the same search just to reassure yourself.",
+            "- Prefer one targeted tool call over multiple exploratory ones.",
+            "- For file changes: read once if needed, then edit/write. Do not loop on reads.",
+            "- Do NOT call Agent, AskUserQuestion, EnterPlanMode, ExitPlanMode, EnterWorktree, ExitWorktree unless the user explicitly asked for them.",
+            "- Only answer in plain text after you have finished the task or no tool is needed.",
+            "",
+            "CRITICAL — FORBIDDEN FORMATS (will be blocked by server):",
+            '- {"name": "X", "arguments": "..."}  <-- NEVER USE',
+            '- {"type": "function", "name": "X"}  <-- NEVER USE',
+            '- {"type": "tool_use", "name": "X"}  <-- NEVER USE',
+            "- <function_calls><invoke name=\"X\">  <-- NEVER USE",
+            "- <tool_call>{...}</tool_call>  <-- NEVER USE",
+            '- {"name":"X","input":{...}} without ##TOOL_CALL## markers  <-- NEVER USE',
+            "- <｜Tool｜> or <｜tool｜> markers  <-- NEVER USE",
+            "ONLY ##TOOL_CALL##...##END_CALL## is accepted. Any other format will cause 'Tool X does not exists.' error.",
+            "",
+            "Available tools (copy name and input keys exactly):",
+        ]
+        if len(names) <= 16:
+            for tool in tools:
+                lines.append(_tool_usage_line(tool, max_desc=72, max_keys=6))
+        else:
+            priority_tools = [
+                "read",
+                "read_file",
+                "write",
+                "write_file",
+                "edit",
+                "multiedit",
+                "bash",
+                "run_command",
+                "grep",
+                "glob",
+                "webfetch",
+                "websearch",
+            ]
+            lines.extend(_preferred_tool_lines(tools, priority_tools, max_desc=72, max_keys=6))
+        lines.append("=== END QWEN CODE CONTRACT ===")
+        return "\n".join(lines)
+
     if client_profile == CLAUDE_CODE_OPENAI_PROFILE:
         lines = [
             "=== MANDATORY TOOL CALL INSTRUCTIONS ===",
@@ -105,32 +169,10 @@ def _build_tool_instruction_block(tools: list[dict], client_profile: str) -> str
         ]
         if len(names) <= 12:
             for tool in tools:
-                name = tool.get("name", "")
-                desc = (tool.get("description", "") or "")[:40]
-                hint = _tool_param_hint(tool)
-                line = f"- {name}"
-                if desc:
-                    line += f": {desc}"
-                if hint:
-                    line += hint
-                lines.append(line)
+                lines.append(_tool_usage_line(tool))
         else:
-            priority_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch", "Agent", "TaskCreate", "TaskUpdate", "AskUserQuestion"]
-            priority_lines = []
-            seen = set()
-            for priority_name in priority_tools:
-                tool = next((item for item in tools if item.get("name") == priority_name), None)
-                if tool is None:
-                    continue
-                seen.add(priority_name)
-                hint = _tool_param_hint(tool)
-                priority_lines.append(f"- {priority_name}{hint}")
-            remaining_names = [name for name in names if name not in seen]
-            lines.extend(priority_lines)
-            if remaining_names:
-                lines.append(f"- Other available tools: {', '.join(remaining_names[:20])}")
-                if len(remaining_names) > 20:
-                    lines.append(f"  ... and {len(remaining_names) - 20} more")
+            priority_tools = ["read", "write", "edit", "bash", "glob", "grep", "websearch", "webfetch", "agent", "taskcreate", "taskupdate", "askuserquestion"]
+            lines.extend(_preferred_tool_lines(tools, priority_tools))
         lines.append("=== END TOOL INSTRUCTIONS ===")
         return "\n".join(lines)
 
@@ -184,24 +226,21 @@ def _build_tool_instruction_block(tools: list[dict], client_profile: str) -> str
         '- <｜tool｜>...  <-- NEVER USE (native tool markers)',
         '- <｜System｜>, <｜User｜>, <｜Assistant｜>  <-- NEVER USE (role markers)',
         "ONLY ##TOOL_CALL##...##END_CALL## is accepted. Any other format will cause 'Tool X does not exists.' error.",
-        "=== END TOOL INSTRUCTIONS ===",
+        "",
+        "Available tools (use these EXACT names):",
     ]
+    if len(names) <= 12:
+        for tool in tools:
+            lines.append(_tool_usage_line(tool))
+    else:
+        priority_tools = ["read", "write", "edit", "bash", "glob", "grep", "webfetch", "websearch", "task", "skill", "todowrite", "question"]
+        lines.extend(_preferred_tool_lines(tools, priority_tools))
+    lines.append("=== END TOOL INSTRUCTIONS ===")
     return "\n".join(lines)
 
 
 def _sanitize_openclaw_user_text(text: str) -> str:
-    cleaned = text.strip()
-    if not cleaned:
-        return cleaned
-    if any(marker in cleaned for marker in OPENCLAW_STARTUP_PATTERNS):
-        return ""
-    if cleaned.startswith(OPENCLAW_UNTRUSTED_METADATA_PREFIX):
-        match = re.search(r"\n\n(\[[^\n]+\]\s*[\s\S]*)$", cleaned)
-        if match:
-            cleaned = match.group(1).strip()
-        else:
-            return ""
-    return cleaned
+    return sanitize_openclaw_user_text(text)
 
 
 def _extract_user_text_only(content, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
@@ -281,7 +320,7 @@ def _normalize_tools(tools: list) -> list:
     return [_normalize_tool(t) for t in tools if tools]
 
 
-def _tool_param_hint(tool: dict) -> str:
+def _tool_param_hint(tool: dict, *, max_keys: int = 3) -> str:
     params = tool.get("parameters", {}) or {}
     if not isinstance(params, dict):
         return ""
@@ -299,11 +338,67 @@ def _tool_param_hint(tool: dict) -> str:
         if key not in ordered_keys:
             ordered_keys.append(key)
 
-    shown = ordered_keys[:3]
+    shown = ordered_keys[:max_keys]
     if not shown:
         return ""
     suffix = ", ..." if len(ordered_keys) > len(shown) else ""
-    return f" input keys: {', '.join(shown)}{suffix}"
+    required_shown = [key for key in required if key in shown][:max_keys]
+    required_suffix = f"; required: {', '.join(required_shown)}" if required_shown else ""
+    return f" input keys: {', '.join(shown)}{suffix}{required_suffix}"
+
+
+def _tool_usage_line(tool: dict, *, max_desc: int = 40, max_keys: int = 3) -> str:
+    name = tool.get("name", "")
+    desc = (tool.get("description", "") or "")[:max_desc]
+    hint = _tool_param_hint(tool, max_keys=max_keys)
+    line = f"- {name}"
+    if desc:
+        line += f": {desc}"
+    if hint:
+        line += hint
+    return line
+
+
+def _find_tool_by_name(tools: list[dict], desired_name: str) -> dict | None:
+    desired = str(desired_name or "").strip().lower()
+    for tool in tools:
+        actual = str(tool.get("name", "")).strip().lower()
+        if actual == desired:
+            return tool
+    return None
+
+
+def _preferred_tool_lines(
+    tools: list[dict],
+    priority_names: list[str],
+    *,
+    max_remaining: int = 20,
+    max_desc: int = 40,
+    max_keys: int = 3,
+) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for priority_name in priority_names:
+        tool = _find_tool_by_name(tools, priority_name)
+        if tool is None:
+            continue
+        actual_name = str(tool.get("name", "")).strip()
+        actual_key = actual_name.lower()
+        if not actual_name or actual_key in seen:
+            continue
+        seen.add(actual_key)
+        lines.append(_tool_usage_line(tool, max_desc=max_desc, max_keys=max_keys))
+
+    remaining_names = [
+        str(tool.get("name", "")).strip()
+        for tool in tools
+        if str(tool.get("name", "")).strip() and str(tool.get("name", "")).strip().lower() not in seen
+    ]
+    if remaining_names:
+        lines.append(f"- Other available tools: {', '.join(remaining_names[:max_remaining])}")
+        if len(remaining_names) > max_remaining:
+            lines.append(f"  ... and {len(remaining_names) - max_remaining} more")
+    return lines
 
 
 def _safe_preview(text: str, limit: int = 240) -> str:
@@ -313,10 +408,28 @@ def _safe_preview(text: str, limit: int = 240) -> str:
     return compact[:limit] + ("...[truncated]" if len(compact) > limit else "")
 
 
+def _is_heavy_tool_profile(client_profile: str) -> bool:
+    return client_profile in {CLAUDE_CODE_OPENAI_PROFILE, QWEN_CODE_OPENAI_PROFILE}
+
+
 def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
-    MAX_CHARS = 18000 if tools else 120000
-    sys_part = "" if tools and client_profile == CLAUDE_CODE_OPENAI_PROFILE else (f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else "")
+    MAX_CHARS = 24000 if (tools and client_profile == QWEN_CODE_OPENAI_PROFILE) else (18000 if tools else 120000)
+    sys_part = "" if tools and _is_heavy_tool_profile(client_profile) else (f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else "")
     tools_part = _build_tool_instruction_block(tools, client_profile) if tools else ""
+    opencode_override = bool(tools and client_profile == OPENCLAW_OPENAI_PROFILE and _looks_like_opencode_system_prompt(system_prompt))
+    if opencode_override and tools_part:
+        tools_part = "\n".join(
+            [
+                "=== OPENCODE TOOL FORMAT OVERRIDE ===",
+                "The opencode system prompt may describe native or built-in tool syntax.",
+                "IGNORE those native tool formats for this gateway.",
+                "For this qwen2API bridge, EVERY tool call MUST use ONLY the ##TOOL_CALL## / ##END_CALL## wrapper below.",
+                "If you need to inspect files or directories, call the tool immediately using that wrapper.",
+                "Never output plain-text plans such as 'I will inspect the directory first' before the tool call.",
+                "=== END OVERRIDE ===",
+                tools_part,
+            ]
+        )
 
     overhead = len(sys_part) + len(tools_part) + 50
     budget = MAX_CHARS - overhead
@@ -325,7 +438,9 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
     NEEDSREVIEW_MARKERS = ("需求回显", "已了解规则", "等待用户输入", "待执行任务", "待确认事项",
                            "[需求回显]", "**需求回显**")
     msg_count = 0
-    max_history_msgs = (12 if client_profile == CLAUDE_CODE_OPENAI_PROFILE else 8) if tools else 200
+    max_history_msgs = (
+        16 if client_profile == QWEN_CODE_OPENAI_PROFILE else (12 if client_profile == CLAUDE_CODE_OPENAI_PROFILE else 8)
+    ) if tools else 200
     for msg in reversed(messages):
         if msg_count >= max_history_msgs:
             break
@@ -345,7 +460,12 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
                 )
             elif not isinstance(tool_content, str):
                 tool_content = str(tool_content)
-            tool_result_limit = 6000 if (client_profile == CLAUDE_CODE_OPENAI_PROFILE and tools) else 300
+            if tools and client_profile == QWEN_CODE_OPENAI_PROFILE:
+                tool_result_limit = 12000
+            elif tools and client_profile == CLAUDE_CODE_OPENAI_PROFILE:
+                tool_result_limit = 6000
+            else:
+                tool_result_limit = 300
             if len(tool_content) > tool_result_limit:
                 tool_content = tool_content[:tool_result_limit] + "...[truncated]"
             line = f"[Tool Result]{(' id=' + tool_call_id) if tool_call_id else ''}\n{tool_content}\n[/Tool Result]"
@@ -359,7 +479,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
         user_text_only = _extract_user_text_only(msg.get("content", ""), client_profile=client_profile) if role == "user" else ""
         text = _extract_text(
             msg.get("content", ""),
-            user_tool_mode=(bool(tools) and role == "user" and client_profile == CLAUDE_CODE_OPENAI_PROFILE),
+            user_tool_mode=(bool(tools) and role == "user" and _is_heavy_tool_profile(client_profile)),
             client_profile=client_profile,
         )
 
@@ -386,7 +506,14 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
             or text.startswith("{")
             or "\"results\"" in text[:100]
         )
-        if client_profile == CLAUDE_CODE_OPENAI_PROFILE and tools:
+        if client_profile == QWEN_CODE_OPENAI_PROFILE and tools:
+            if is_tool_result:
+                max_len = 10000
+            elif role == "assistant":
+                max_len = 700
+            else:
+                max_len = 2200
+        elif client_profile == CLAUDE_CODE_OPENAI_PROFILE and tools:
             if is_tool_result:
                 max_len = 6000
             elif role == "assistant":
@@ -458,7 +585,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
                 first_user_preview = _safe_preview(
                     _extract_text(
                         first_user.get("content", ""),
-                        user_tool_mode=(client_profile == CLAUDE_CODE_OPENAI_PROFILE),
+                        user_tool_mode=_is_heavy_tool_profile(client_profile),
                         client_profile=client_profile,
                     ),
                     220,
@@ -474,10 +601,12 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
             tool_instruction_preview,
         )
     parts = []
+    if tools_part and opencode_override:
+        parts.append(tools_part)
     if sys_part:
         parts.append(sys_part)
     parts.extend(history_parts)
-    if tools_part:
+    if tools_part and not opencode_override:
         parts.append(tools_part)
     if latest_user_line:
         parts.append(latest_user_line)
@@ -486,6 +615,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, 
 
 
 def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> PromptBuildResult:
+    resolved_client_profile = client_profile
     messages = req_data.get("messages", [])
     tools = _normalize_tools(req_data.get("tools", []))
     tool_enabled = bool(tools)
@@ -498,10 +628,11 @@ def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_
     if not system_prompt:
         for msg in messages:
             if msg.get("role") == "system":
-                system_prompt = _extract_text(msg.get("content", ""), client_profile=client_profile)
+                system_prompt = _extract_text(msg.get("content", ""), client_profile=resolved_client_profile)
                 break
     return PromptBuildResult(
-        prompt=build_prompt_with_tools(system_prompt, messages, tools, client_profile=client_profile),
+        prompt=build_prompt_with_tools(system_prompt, messages, tools, client_profile=resolved_client_profile),
         tools=tools,
         tool_enabled=tool_enabled,
+        client_profile=resolved_client_profile,
     )

@@ -13,6 +13,16 @@ from backend.core.request_logging import update_request_context
 from backend.runtime.stream_metrics import StreamMetrics
 from backend.services import tool_parser
 from backend.toolcall.normalize import normalize_tool_name
+from backend.toolcall.runtime_tools import (
+    is_list_directory_tool_name,
+    is_read_tool_name,
+    is_shell_tool_name,
+    looks_like_listing_shell_command,
+    parse_tool_call_arguments,
+    read_target_path,
+    shell_command_signature,
+    stable_tool_input_json,
+)
 from backend.toolcall.stream_state import StreamingToolCallState
 
 
@@ -118,6 +128,7 @@ __all__ = [
     "continue_after_retry_directive",
     "evaluate_retry_directive",
     "extract_blocked_tool_names",
+    "detect_terminal_tool_loop",
     "finalize_anthropic_stream_success",
     "complete_anthropic_stream_success",
     "has_recent_search_no_results",
@@ -129,6 +140,7 @@ __all__ = [
     "recent_same_tool_identity_count",
     "request_max_attempts",
     "retryable_usage_delta",
+    "recent_exploration_tool_count",
     "should_force_finish_after_tool_use",
     "tool_identity",
 ]
@@ -203,13 +215,75 @@ def has_recent_search_no_results(messages: list[dict[str, Any]] | None) -> bool:
     return False
 
 
+def _assistant_tool_uses(message: dict[str, Any]) -> list[tuple[str, Any]]:
+    tool_uses: list[tuple[str, Any]] = []
+    content = message.get("content", [])
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name"):
+                tool_uses.append((block.get("name", ""), block.get("input", {})))
+    if tool_uses:
+        return tool_uses
+
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function", {}) if isinstance(call.get("function"), dict) else {}
+        name = fn.get("name", "")
+        if not name:
+            continue
+        tool_uses.append((name, parse_tool_call_arguments(call)))
+    return tool_uses
+
+
+def is_exploration_tool_call(tool_name: str, tool_input: Any = None) -> bool:
+    if is_read_tool_name(tool_name) or is_list_directory_tool_name(tool_name):
+        return True
+    if is_shell_tool_name(tool_name) and isinstance(tool_input, dict):
+        command, _ = shell_command_signature(tool_input)
+        return looks_like_listing_shell_command(command)
+    return False
+
+
+def recent_exploration_tool_count(messages: list[dict[str, Any]] | None) -> int:
+    count = 0
+    started = False
+    for msg in reversed(messages or []):
+        if msg.get("role") != "assistant":
+            continue
+        tool_uses = _assistant_tool_uses(msg)
+
+        if not tool_uses:
+            if started:
+                break
+            continue
+
+        started = True
+        if len(tool_uses) != 1:
+            break
+
+        tool_name, tool_input = tool_uses[0]
+        if is_exploration_tool_call(tool_name, tool_input):
+            count += 1
+            continue
+        break
+
+    return count
+
+
 def tool_identity(tool_name: str, tool_input: Any = None) -> str:
     try:
-        if tool_name == "Read" and isinstance(tool_input, dict):
-            return f"Read::{tool_input.get('file_path', '').strip()}"
-        if tool_name == "read" and isinstance(tool_input, dict):
-            return f"read::{tool_input.get('path', '').strip()}"
-        return f"{tool_name}::{json.dumps(tool_input or {}, ensure_ascii=False, sort_keys=True)}"
+        if is_read_tool_name(tool_name):
+            return f"read::{read_target_path(tool_input)}"
+        if is_list_directory_tool_name(tool_name):
+            return f"list_directory::{stable_tool_input_json(tool_input)}"
+        if is_shell_tool_name(tool_name) and isinstance(tool_input, dict):
+            command, workdir = shell_command_signature(tool_input)
+            return f"bash::{str(command).strip()}::{str(workdir).strip()}"
+        return f"{tool_name}::{stable_tool_input_json(tool_input)}"
     except Exception:
         return tool_name or ""
 
@@ -221,18 +295,13 @@ def recent_same_tool_identity_count(messages: list[dict[str, Any]] | None, tool_
     for msg in reversed(messages or []):
         if msg.get("role") != "assistant":
             continue
-        content = msg.get("content", [])
-        if not isinstance(content, list):
-            if started:
-                break
-            continue
-        tools = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name")]
+        tools = _assistant_tool_uses(msg)
         if not tools:
             if started:
                 break
             continue
         started = True
-        if len(tools) == 1 and tool_identity(tools[0].get("name", ""), tools[0].get("input", {})) == target:
+        if len(tools) == 1 and tool_identity(tools[0][0], tools[0][1]) == target:
             count += 1
             continue
         break
@@ -240,24 +309,41 @@ def recent_same_tool_identity_count(messages: list[dict[str, Any]] | None, tool_
 
 
 def has_recent_openai_same_tool_call(history_messages: list[dict[str, Any]] | None, tool_name: str, tool_input: Any = None) -> bool:
-    target = tool_identity(tool_name, tool_input)
-    for msg in reversed(history_messages or []):
-        if msg.get("role") != "assistant":
-            continue
-        tool_calls = msg.get("tool_calls")
-        if not isinstance(tool_calls, list) or not tool_calls:
-            continue
-        if len(tool_calls) != 1:
-            return False
-        fn = tool_calls[0].get("function", {}) if isinstance(tool_calls[0], dict) else {}
-        name = fn.get("name", "")
-        raw_args = fn.get("arguments", "{}")
-        try:
-            parsed_args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args else raw_args
-        except (json.JSONDecodeError, ValueError):
-            parsed_args = {"raw": raw_args}
-        return tool_identity(name, parsed_args) == target
-    return False
+    return recent_same_tool_identity_count(history_messages, tool_name, tool_input) >= 1
+
+
+def detect_terminal_tool_loop(
+    history_messages: list[dict[str, Any]] | None,
+    directive: RuntimeToolDirective,
+) -> str | None:
+    first_tool = next((b for b in directive.tool_blocks if b.get("type") == "tool_use"), None)
+    if not first_tool:
+        return None
+
+    tool_name = str(first_tool.get("name", "") or "")
+    tool_input = first_tool.get("input", {})
+    repeated_count = recent_same_tool_identity_count(history_messages, tool_name, tool_input)
+
+    if is_read_tool_name(tool_name):
+        target = read_target_path(tool_input) or "<unknown>"
+        if repeated_count >= 1:
+            return (
+                f"Loop detected: the model keeps calling {tool_name} on the same target ({target}) "
+                "even though the tool result is already present in history. "
+                "The server stopped the repeated tool call to prevent an infinite loop. "
+                "Please continue from the existing file content instead of rereading it."
+            )
+
+    if is_list_directory_tool_name(tool_name) or is_shell_tool_name(tool_name):
+        exploration_count = recent_exploration_tool_count(history_messages)
+        if exploration_count >= 2 and is_exploration_tool_call(tool_name, tool_input):
+            return (
+                f"Loop detected: the model is stuck repeating exploratory tool calls such as {tool_name}. "
+                "The server stopped the tool loop to prevent unbounded retries. "
+                "Please move directly to the target file analysis or file edit step."
+            )
+
+    return None
 
 
 def has_invalid_textual_tool_contract(answer_text: str) -> bool:
@@ -366,6 +452,16 @@ async def collect_completion_run(
         tool_sieve = tool_parser.ToolSieve(request.tool_names)
         log.info("[Collect] Tool Sieve 已启用，工具列表: %s", request.tool_names)
 
+    def _strip_textual_tool_wrapper(text: str, detected_calls: list[dict[str, Any]]) -> str:
+        if not text or not request.tools or not detected_calls:
+            return text
+        tool_blocks, stop_reason = tool_parser.parse_tool_calls_silent(text, request.tools)
+        if stop_reason != "tool_use":
+            return text
+        text_blocks = [block for block in tool_blocks if block.get("type") == "text"]
+        cleaned = "\n".join((block.get("text", "") or "").strip() for block in text_blocks).strip()
+        return cleaned
+
     def _finalize_result(*, reason: str | None = None) -> RuntimeExecutionResult:
         answer_text = "".join(answer_fragments)
         reasoning_text = "".join(reasoning_fragments)
@@ -391,6 +487,7 @@ async def collect_completion_run(
                             "name": call["name"],
                             "input": call["input"]
                         } for call in calls]
+                        answer_text = _strip_textual_tool_wrapper(answer_text, detected_tool_calls)
                         final_finish_reason = "tool_calls"
                         log.info(
                             "[Collect] ✓ Tool Sieve 刷新检测到工具调用: tools=%s",
@@ -424,6 +521,9 @@ async def collect_completion_run(
                     [t.get("name") for t in detected_tool_calls],
                     len(answer_text),
                 )
+
+        if detected_tool_calls:
+            answer_text = _strip_textual_tool_wrapper(answer_text, detected_tool_calls)
 
         # 检查空输出
         if not detected_tool_calls and not answer_text.strip() and not reasoning_text.strip():
@@ -726,53 +826,77 @@ def evaluate_retry_directive(
         if directive.stop_reason == "tool_use":
             first_tool = next((b for b in directive.tool_blocks if b.get("type") == "tool_use"), None)
             if first_tool:
-                repeated_same_tool = False
-                if getattr(request, "client_profile", CLAUDE_CODE_OPENAI_PROFILE) == "openclaw_openai":
-                    repeated_same_tool = has_recent_openai_same_tool_call(
-                        history_messages,
-                        first_tool.get("name", ""),
-                        first_tool.get("input", {}),
+                first_tool_name = first_tool.get("name", "")
+                first_tool_input = first_tool.get("input", {})
+                repeated_count = recent_same_tool_identity_count(
+                    history_messages,
+                    first_tool_name,
+                    first_tool_input,
+                )
+                repeated_same_tool = repeated_count >= 1
+                repeated_same_read = is_read_tool_name(first_tool_name) and repeated_count >= 1
+                if repeated_same_read and can_retry_after_output:
+                    read_target = read_target_path(first_tool_input) or "the same file"
+                    force_text = (
+                        f"[强制要求]: 你已经连续重复读取同一个文件：{read_target}。"
+                        "这是无效循环。不要再次调用 Read/read_file。"
+                        "直接使用现有读取结果，进入编辑、写入、运行验证，或直接完成回答。"
+                        f"\n[MANDATORY]: You already reread the same file in a loop: {read_target}. "
+                        "Do NOT call Read/read_file on that same target again. "
+                        "Use the existing file content and move forward to edit, write, verify, or finish the answer."
                     )
-                else:
-                    repeated_same_tool = recent_same_tool_identity_count(
-                        history_messages,
-                        first_tool.get("name", ""),
-                        first_tool.get("input", {}),
-                    ) >= 1
+                    return _retry(
+                        f"repeated_same_read:{first_tool_name}",
+                        inject_assistant_message(current_prompt, force_text),
+                    )
                 if repeated_same_tool and can_retry_after_output:
                     force_text = (
-                        f"[强制要求]: 你已经用相同参数调用了 {first_tool.get('name')}。"
+                        f"[强制要求]: 你已经用相同参数调用了 {first_tool_name}。"
                         "不要重复相同的工具调用。"
                         "使用已有的工具结果，选择下一个相关工具或完成任务。"
                         "如果是配置文件任务，读取一次后直接编辑/写入文件，不要重复读取。"
-                        f"\n[MANDATORY]: You already called {first_tool.get('name')} with the same input. "
+                        f"\n[MANDATORY]: You already called {first_tool_name} with the same input. "
                         "Do NOT repeat the same tool call. "
                         "Use the tool result you already have and either choose the next relevant tool or finish the task. "
                         "If this is a config-file task, read once and then edit/write the file instead of rereading it."
                     )
                     return _retry(
-                        f"repeated_same_tool:{first_tool.get('name', '')}",
+                        f"repeated_same_tool:{first_tool_name}",
                         inject_assistant_message(current_prompt, force_text),
                     )
-            if (
-                first_tool
-                and first_tool.get("name") == "Read"
-                and has_recent_unchanged_read_result(history_messages)
-            ):
-                if can_retry_after_output:
+                exploration_count = recent_exploration_tool_count(history_messages)
+                if is_exploration_tool_call(first_tool_name, first_tool_input) and exploration_count >= 2 and can_retry_after_output:
                     force_text = (
-                        "[强制要求]: 你刚收到'Unchanged since last read'（文件未改变）。"
-                        "不要再次读取同一个文件。"
-                        "现在选择其他工具或完成任务。"
-                        "\n[MANDATORY]: You just received 'Unchanged since last read'. "
-                        "Do NOT call Read again. Choose another tool or finish the task."
+                        f"[强制要求]: 你已经连续进行了 {exploration_count} 次探索型工具调用，最近一次是 {first_tool_name}。"
+                        "不要继续用 Read/read_file、Glob/list_directory、Bash/run_shell_command(ls/pwd/tree/find) 做泛探索。"
+                        "必须基于已有结果强制推进：锁定目标文件后直接编辑/写入，执行真正需要的命令，或直接完成回答。"
+                        f"\n[MANDATORY]: You are in an exploration loop ({exploration_count} exploratory calls in a row, latest: {first_tool_name}). "
+                        "Do NOT keep exploring with Read/read_file, Glob/list_directory, or Bash/run_shell_command listing commands. "
+                        "Force progress now: pick the concrete target file and edit/write it, run the real non-listing command you need, or finish the answer."
                     )
                     return _retry(
-                        "unchanged_read_result",
+                        f"exploration_loop:{first_tool_name}:{exploration_count}",
                         inject_assistant_message(current_prompt, force_text),
                     )
-                else:
-                    log.warning(f"[Runtime] Blocked repeated Read after 'Unchanged since last read', but cannot retry")
+                if (
+                    first_tool
+                    and is_read_tool_name(first_tool.get("name", ""))
+                    and has_recent_unchanged_read_result(history_messages)
+                ):
+                    if can_retry_after_output:
+                        force_text = (
+                            "[强制要求]: 你刚收到'Unchanged since last read'（文件未改变）。"
+                            "不要再次读取同一个文件。"
+                            "直接使用现有文件内容，转去编辑、写入、验证，或完成任务。"
+                            "\n[MANDATORY]: You just received 'Unchanged since last read'. "
+                            "Do NOT call Read again on that same file. Use the current file content and move to edit, write, verify, or finish."
+                        )
+                        return _retry(
+                            "unchanged_read_result",
+                            inject_assistant_message(current_prompt, force_text),
+                        )
+                    else:
+                        log.warning(f"[Runtime] Blocked repeated Read after 'Unchanged since last read', but cannot retry")
 
             # 防止自动调用Agent工具
             if (

@@ -5,6 +5,19 @@ import re
 from typing import Any, Iterable
 
 
+TOOL_NAME_ALIASES = {
+    "shellcommand": ("Bash", "exec_command", "exec", "process"),
+    "shellcmd": ("Bash", "exec_command", "exec", "process"),
+    "runcommand": ("Bash", "exec_command", "exec", "process"),
+    "runshellcommand": ("Bash", "exec_command", "exec", "process"),
+    "execcommand": ("Bash", "exec_command", "exec", "process"),
+    "listdirectory": ("search_files", "Glob", "glob", "list_dir", "list_files", "ls"),
+    "listdir": ("search_files", "Glob", "glob", "list_dir", "list_files", "ls"),
+    "listfiles": ("search_files", "Glob", "glob", "list_dir", "ls"),
+    "ls": ("search_files", "Glob", "glob", "list_dir", "list_files"),
+}
+
+
 def _tool_alias_key(value: str) -> str:
     lowered = value.strip().lower()
     if not lowered:
@@ -40,7 +53,18 @@ def normalize_tool_name(name: str, allowed_names: Iterable[str]) -> str:
             return allowed_name
 
     registry = build_tool_name_registry(allowed_list)
-    return registry.get(_tool_alias_key(name), name)
+    key = _tool_alias_key(name)
+    canonical = registry.get(key)
+    if canonical:
+        return canonical
+
+    aliased_candidates = TOOL_NAME_ALIASES.get(key, ())
+    for alias_name in aliased_candidates:
+        aliased_key = _tool_alias_key(alias_name)
+        if aliased_key in registry:
+            return registry[aliased_key]
+
+    return name
 
 
 def normalize_arguments(value: Any) -> dict[str, Any]:
