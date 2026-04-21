@@ -28,10 +28,48 @@ def _normalize_sign_region(region: str) -> str:
     return region
 
 
+def _looks_like_dns_or_connect_failure(exc: Exception) -> bool:
+    text = str(exc or "")
+    lowered = text.lower()
+    markers = (
+        "nameresolutionerror",
+        "temporary failure in name resolution",
+        "failed to resolve",
+        "max retries exceeded",
+        "connectionerror",
+        "newconnectionerror",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _build_regional_endpoint(bucketname: str, endpoint: str, region: str) -> str | None:
+    endpoint = str(endpoint or "").strip()
+    bucketname = str(bucketname or "").strip()
+    region = str(region or "").strip()
+    if not endpoint or not bucketname or not region:
+        return None
+    if "oss-accelerate.aliyuncs.com" not in endpoint:
+        return None
+    regional_host = f"oss-{region}.aliyuncs.com"
+    bucket_prefix = f"{bucketname}."
+    if endpoint.startswith(bucket_prefix):
+        return f"{bucket_prefix}{regional_host}"
+    return regional_host
+
+
 class UpstreamFileUploader:
     def __init__(self, client, settings):
         self.client = client
         self.settings = settings
+
+    @staticmethod
+    def _build_bucket(auth, endpoint: str, bucketname: str, region: str):
+        return oss2.Bucket(
+            auth,
+            f"https://{endpoint}",
+            bucketname,
+            region=region,
+        )
 
     async def upload_local_file(self, acc, local_file_meta: dict[str, Any]) -> dict[str, Any]:
         filename = local_file_meta["filename"]
@@ -66,17 +104,25 @@ class UpstreamFileUploader:
             raise RuntimeError(f"getstsToken missing file data: {sts_data}")
 
         auth = oss2.StsAuth(access_key_id, access_key_secret, security_token, auth_version='v4')
-        bucket = oss2.Bucket(
-            auth,
-            f"https://{endpoint}",
-            bucketname,
-            region=region,
-        )
-        put_result = bucket.put_object(
-            file_path_remote,
-            raw,
-            headers={"Content-Type": content_type},
-        )
+        upload_endpoint = endpoint
+        bucket = self._build_bucket(auth, upload_endpoint, bucketname, region)
+        try:
+            put_result = bucket.put_object(
+                file_path_remote,
+                raw,
+                headers={"Content-Type": content_type},
+            )
+        except Exception as exc:
+            fallback_endpoint = _build_regional_endpoint(bucketname, endpoint, region)
+            if not fallback_endpoint or fallback_endpoint == upload_endpoint or not _looks_like_dns_or_connect_failure(exc):
+                raise
+            bucket = self._build_bucket(auth, fallback_endpoint, bucketname, region)
+            put_result = bucket.put_object(
+                file_path_remote,
+                raw,
+                headers={"Content-Type": content_type},
+            )
+            upload_endpoint = fallback_endpoint
         if getattr(put_result, 'status', None) not in (200, 201):
             raise RuntimeError(f"OSS put_object failed: status={getattr(put_result, 'status', None)}")
 
@@ -117,7 +163,7 @@ class UpstreamFileUploader:
 
         user_id = file_path_remote.split('/', 1)[0] if '/' in file_path_remote else ""
         now_ms = int(time.time() * 1000)
-        put_url = f"https://{bucketname}.{endpoint}/{file_path_remote.lstrip('/')}"
+        put_url = f"https://{upload_endpoint}/{file_path_remote.lstrip('/')}"
         remote_ref = {
             "type": "file",
             "file": {
