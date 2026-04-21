@@ -8,7 +8,9 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  IMAGE_NAME: ${{ vars.DOCKERHUB_REPOSITORY != '' && vars.DOCKERHUB_REPOSITORY || format('{0}/qwen2api', secrets.DOCKERHUB_USERNAME) }}
+  DOCKERHUB_USERNAME_VALUE: ${{ vars.DOCKERHUB_USERNAME != '' && vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN_VALUE: ${{ secrets.DOCKERHUB_TOKEN != '' && secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
+  IMAGE_NAME: ${{ vars.DOCKERHUB_REPOSITORY != '' && vars.DOCKERHUB_REPOSITORY || format('{0}/qwen2api', vars.DOCKERHUB_USERNAME != '' && vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME) }}
 
 permissions:
   contents: read
@@ -34,8 +36,8 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME_VALUE }}
+          password: ${{ env.DOCKERHUB_TOKEN_VALUE }}
 
       - name: Extract metadata
         id: meta
