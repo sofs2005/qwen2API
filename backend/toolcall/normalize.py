@@ -6,6 +6,8 @@ from typing import Any, Iterable
 
 
 TOOL_NAME_ALIASES = {
+    "exec": ("Bash", "exec_command", "process"),
+    "process": ("Bash", "exec_command", "exec"),
     "shellcommand": ("Bash", "exec_command", "exec", "process"),
     "shellcmd": ("Bash", "exec_command", "exec", "process"),
     "runcommand": ("Bash", "exec_command", "exec", "process"),

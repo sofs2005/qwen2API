@@ -792,9 +792,10 @@ def evaluate_retry_directive(
         blocked_name = normalize_tool_name(state.blocked_tool_names[0], request.tool_names)
         return _retry(
             f"blocked_tool_name:{blocked_name}",
-            tool_parser.inject_format_reminder(
+            tool_parser.inject_format_reminder_for_allowed_tools(
                 current_prompt,
                 blocked_name,
+                request.tool_names,
                 client_profile=getattr(request, "client_profile", CLAUDE_CODE_OPENAI_PROFILE),
             ),
         )
@@ -808,9 +809,10 @@ def evaluate_retry_directive(
                     fallback_tool_name = request.tool_names[0] if request.tool_names else "tool"
                     return _retry(
                         f"invalid_textual_tool_contract:{fallback_tool_name}",
-                        tool_parser.inject_format_reminder(
+                        tool_parser.inject_format_reminder_for_allowed_tools(
                             current_prompt,
                             fallback_tool_name,
+                            request.tool_names,
                             client_profile=getattr(request, "client_profile", CLAUDE_CODE_OPENAI_PROFILE),
                         ),
                     )
@@ -819,9 +821,10 @@ def evaluate_retry_directive(
                     fallback_tool_name = request.tool_names[0] if request.tool_names else "tool"
                     return _retry(
                         f"unparsed_textual_tool_contract:{fallback_tool_name}",
-                        tool_parser.inject_format_reminder(
+                        tool_parser.inject_format_reminder_for_allowed_tools(
                             current_prompt,
                             fallback_tool_name,
+                            request.tool_names,
                             client_profile=getattr(request, "client_profile", CLAUDE_CODE_OPENAI_PROFILE),
                         ),
                     )

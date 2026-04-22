@@ -796,3 +796,14 @@ def inject_format_reminder(prompt: str, tool_name: str, *, client_profile: str =
     if prompt.endswith("Assistant:"):
         return prompt[: -len("Assistant:")] + reminder + "\nAssistant:"
     return prompt + "\n\n" + reminder + "\nAssistant:"
+
+
+def inject_format_reminder_for_allowed_tools(
+    prompt: str,
+    tool_name: str,
+    allowed_tool_names: list[str] | None,
+    *,
+    client_profile: str = OPENCLAW_OPENAI_PROFILE,
+) -> str:
+    normalized_tool_name = normalize_tool_name(tool_name, allowed_tool_names or [])
+    return inject_format_reminder(prompt, normalized_tool_name, client_profile=client_profile)
