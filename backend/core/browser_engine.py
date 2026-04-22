@@ -20,6 +20,7 @@ _CAMOUFOX_OPTS = {
 @asynccontextmanager
 async def _new_browser():
     from camoufox.async_api import AsyncCamoufox
+    await ensure_browser_installed()
 
     async with AsyncCamoufox(**_CAMOUFOX_OPTS) as browser:
         yield browser

@@ -31,7 +31,7 @@ def check_python():
 
 
 def install_backend_deps():
-    print("⚡ [1/4] 安装后端依赖...")
+    print("⚡ [1/3] 安装后端依赖...")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(WORKSPACE_DIR)
     try:
@@ -44,35 +44,8 @@ def install_backend_deps():
     except Exception as e:
         print(f"⚠ 后端依赖安装异常: {e}")
 
-
-def fetch_browser():
-    print("⚡ [2/4] 检查注册功能所需的 Camoufox 浏览器内核...")
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(WORKSPACE_DIR)
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "camoufox", "path"],
-            capture_output=True, text=True, timeout=10, env=env,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            print("✓ 浏览器内核已存在，跳过下载")
-            return
-    except Exception:
-        pass
-    print("  -> 正在下载 Camoufox 内核（仅注册/激活账号时会使用，请耐心等待）...")
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "camoufox", "fetch"],
-            cwd=WORKSPACE_DIR,
-            env=env,
-        )
-        print("✓ 浏览器内核下载完成")
-    except Exception as e:
-        print(f"⚠ 浏览器内核下载异常: {e}")
-
-
 def start_frontend() -> subprocess.Popen:
-    print("⚡ [3/4] 启动前端开发服务器...")
+    print("⚡ [2/3] 启动前端开发服务器...")
     is_windows = os.name == "nt"
 
     if not (FRONTEND_DIR / "node_modules").exists():
@@ -127,7 +100,7 @@ def kill_port(port: int):
 
 
 def start_backend() -> subprocess.Popen:
-    print("⚡ [4/4] 启动后端服务...")
+    print("⚡ [3/3] 启动后端服务...")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(WORKSPACE_DIR)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -157,7 +130,11 @@ def start_backend() -> subprocess.Popen:
     ready_event = threading.Event()
 
     def read_output():
-        for line in iter(proc.stdout.readline, b""):
+        stdout = proc.stdout
+        if stdout is None:
+            ready_event.set()
+            return
+        for line in iter(stdout.readline, b""):
             try:
                 decoded = line.decode("utf-8", errors="replace")
             except Exception:
@@ -181,7 +158,6 @@ def main():
     ensure_dirs()
     check_python()
     install_backend_deps()
-    fetch_browser()
     backend_proc = start_backend()
     frontend_proc = start_frontend()
 
