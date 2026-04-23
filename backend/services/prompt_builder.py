@@ -11,6 +11,12 @@ from backend.services.client_profiles import (
     looks_like_opencode_system_prompt,
     sanitize_openclaw_user_text,
 )
+from backend.toolcore.prompt_contract import (
+    build_tool_instruction_block as toolcore_build_tool_instruction_block,
+    normalize_prompt_tool,
+    normalize_prompt_tools,
+    render_history_tool_call as toolcore_render_history_tool_call,
+)
 
 log = logging.getLogger("qwen2api.prompt")
 
@@ -42,12 +48,7 @@ def _compact_history_tool_input(name: str, input_data: dict, client_profile: str
 
 
 def _render_history_tool_call(name: str, input_data: dict, client_profile: str) -> str:
-    payload = json.dumps({"name": name, "input": _compact_history_tool_input(name, input_data, client_profile)}, ensure_ascii=False)
-    # Claude Code profile 使用 ##TOOL_CALL## 格式，避免 Qwen 服务器拦截
-    if client_profile == CLAUDE_CODE_OPENAI_PROFILE:
-        return f"##TOOL_CALL##\n{payload}\n##END_CALL##"
-    # OpenClaw 和其他 profile 使用 ##TOOL_CALL## 格式
-    return f"##TOOL_CALL##\n{payload}\n##END_CALL##"
+    return toolcore_render_history_tool_call(name, input_data, client_profile)
 
 
 def _build_tool_instruction_block(
@@ -57,6 +58,13 @@ def _build_tool_instruction_block(
     tool_choice_mode: str = "auto",
     required_tool_name: str | None = None,
 ) -> str:
+    return toolcore_build_tool_instruction_block(
+        tools,
+        client_profile,
+        tool_choice_mode=tool_choice_mode,
+        required_tool_name=required_tool_name,
+    )
+
     names = [t.get("name", "") for t in tools if t.get("name")]
     force_constraint_lines: list[str] = []
     if tool_choice_mode == "required":
@@ -332,22 +340,11 @@ def _extract_text(content, user_tool_mode: bool = False, client_profile: str = O
 
 
 def _normalize_tool(tool: dict) -> dict:
-    if tool.get("type") == "function" and "function" in tool:
-        fn = tool["function"]
-        return {
-            "name": fn.get("name", ""),
-            "description": fn.get("description", ""),
-            "parameters": fn.get("parameters", {}),
-        }
-    return {
-        "name": tool.get("name", ""),
-        "description": tool.get("description", ""),
-        "parameters": tool.get("input_schema") or tool.get("parameters") or {},
-    }
+    return normalize_prompt_tool(tool)
 
 
 def _normalize_tools(tools: list) -> list:
-    return [_normalize_tool(t) for t in tools if tools]
+    return normalize_prompt_tools(tools)
 
 
 def _tool_param_hint(tool: dict, *, max_keys: int = 3) -> str:
