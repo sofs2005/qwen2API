@@ -5,6 +5,7 @@ import uuid
 from typing import Any
 
 from backend.runtime.execution import build_tool_directive
+from backend.toolcore.roundtrip import build_response_function_call_item
 
 
 def build_openai_completion_payload(*, completion_id: str, created: int, model_name: str, prompt: str, execution, standard_request) -> dict[str, Any]:
@@ -94,16 +95,7 @@ def build_openai_response_payload(
         for block in directive.tool_blocks:
             if block.get("type") != "tool_use":
                 continue
-            output.append(
-                {
-                    "id": block["id"],
-                    "type": "function_call",
-                    "status": "completed",
-                    "call_id": block["id"],
-                    "name": block["name"],
-                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
-                }
-            )
+            output.append(build_response_function_call_item(call_id=block["id"], name=block["name"], input_data=block.get("input", {})))
     else:
         output.append(
             {

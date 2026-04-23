@@ -9,6 +9,11 @@ from typing import Any
 
 from backend.adapter.standard_request import StandardRequest
 from backend.runtime.execution import build_tool_directive
+from backend.toolcore.roundtrip import (
+    build_response_function_call_item,
+    response_function_call_to_message,
+    response_function_output_to_message,
+)
 
 log = logging.getLogger("qwen2api.responses")
 TOOL_ARGUMENT_CHUNK_SIZE = 128
@@ -85,39 +90,10 @@ def response_input_item_to_messages(item: Any) -> list[dict[str, Any]]:
 
     item_type = item.get("type")
     if item_type == "function_call_output":
-        output = item.get("output", "")
-        if not isinstance(output, str):
-            output = json.dumps(output, ensure_ascii=False)
-        return [
-            {
-                "role": "tool",
-                "tool_call_id": item.get("call_id", ""),
-                "content": output,
-            }
-        ]
+        return response_function_output_to_message(item)
 
     if item_type == "function_call":
-        arguments = item.get("arguments", "{}")
-        if isinstance(arguments, dict):
-            arguments = json.dumps(arguments, ensure_ascii=False)
-        return [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": item.get("call_id")
-                        or item.get("id")
-                        or f"call_{uuid.uuid4().hex[:12]}",
-                        "type": "function",
-                        "function": {
-                            "name": item.get("name", ""),
-                            "arguments": arguments or "{}",
-                        },
-                    }
-                ],
-            }
-        ]
+        return response_function_call_to_message(item)
 
     if item_type in {"input_text", "output_text", "text"}:
         role = item.get("role", "user")
@@ -190,6 +166,7 @@ class ResponsesStreamTranslator:
         self.text_item_id = f"msg_{uuid.uuid4().hex[:24]}"
         self.text_item_started = False
         self.tool_item_ids: set[str] = set()
+        self.streamed_tool_item_ids: set[str] = set()
 
     def _next_sequence(self) -> int:
         self.sequence_number += 1
@@ -272,6 +249,23 @@ class ResponsesStreamTranslator:
             )
         )
 
+    def on_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
+        for tool_call in tool_calls:
+            call_id = str(tool_call.get("id") or "").strip()
+            name = str(tool_call.get("name") or "").strip()
+            input_data = tool_call.get("input", {}) if isinstance(tool_call.get("input", {}), dict) else {}
+            if not call_id or not name or call_id in self.streamed_tool_item_ids:
+                continue
+            item = build_response_function_call_item(call_id=call_id, name=name, input_data=input_data)
+            arguments = item["arguments"]
+            self.pending_chunks.append(sse_event({"type": "response.output_item.added", "sequence_number": self._next_sequence(), "output_index": 0, "item": item}))
+            self.pending_chunks.append(sse_event({"type": "response.function_call_arguments.delta", "sequence_number": self._next_sequence(), "item_id": item["id"], "output_index": 0, "delta": ""}))
+            for start in range(0, len(arguments), TOOL_ARGUMENT_CHUNK_SIZE):
+                self.pending_chunks.append(sse_event({"type": "response.function_call_arguments.delta", "sequence_number": self._next_sequence(), "item_id": item["id"], "output_index": 0, "delta": arguments[start:start + TOOL_ARGUMENT_CHUNK_SIZE]}))
+            self.pending_chunks.append(sse_event({"type": "response.function_call_arguments.done", "sequence_number": self._next_sequence(), "item_id": item["id"], "output_index": 0, "arguments": arguments}))
+            self.pending_chunks.append(sse_event({"type": "response.output_item.done", "sequence_number": self._next_sequence(), "output_index": 0, "item": item}))
+            self.streamed_tool_item_ids.add(call_id)
+
     def finalize(
         self,
         *,
@@ -350,7 +344,7 @@ class ResponsesStreamTranslator:
                 )
                 output_index += 1
 
-            tool_items = [item for item in response_payload["output"] if item.get("type") == "function_call"]
+            tool_items = [item for item in response_payload["output"] if item.get("type") == "function_call" and item.get("id") not in self.streamed_tool_item_ids]
             for tool_item in tool_items:
                 arguments = str(tool_item.get("arguments", "") or "")
                 chunks.append(
