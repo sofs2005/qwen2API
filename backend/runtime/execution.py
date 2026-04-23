@@ -12,6 +12,8 @@ from backend.core.config import settings
 from backend.core.request_logging import update_request_context
 from backend.runtime.stream_metrics import StreamMetrics
 from backend.services import tool_parser
+from backend.toolcore.directive_parser import parse_state_tool_calls, parse_textual_tool_calls
+from backend.toolcore.stream_sieve import ToolStreamSieve
 from backend.toolcall.normalize import normalize_tool_name
 from backend.toolcall.runtime_tools import (
     is_list_directory_tool_name,
@@ -449,7 +451,7 @@ async def collect_completion_run(
     # 初始化 Tool Sieve 用于实时检测
     tool_sieve = None
     if request.tools:
-        tool_sieve = tool_parser.ToolSieve(request.tool_names)
+        tool_sieve = ToolStreamSieve(request.tool_names) if settings.TOOLCORE_V2_ENABLED else tool_parser.ToolSieve(request.tool_names)
         log.info("[Collect] Tool Sieve 已启用，工具列表: %s", request.tool_names)
 
     def _strip_textual_tool_wrapper(text: str, detected_calls: list[dict[str, Any]]) -> str:
@@ -657,23 +659,32 @@ async def collect_completion_run(
 
 
 def parse_tool_directive_once(request: StandardRequest, state: RuntimeAttemptState) -> RuntimeToolDirective:
-    if state.tool_calls:
-        return RuntimeToolDirective(
-            tool_blocks=[
-                {
-                    "type": "tool_use",
-                    "id": tool_call["id"],
-                    "name": normalize_tool_name(tool_call["name"], request.tool_names),
-                    "input": tool_call.get("input", {}),
-                }
-                for tool_call in state.tool_calls
-            ],
-            stop_reason="tool_use",
-        )
+    if settings.TOOLCORE_V2_ENABLED:
+        if state.tool_calls:
+            parsed = parse_state_tool_calls(state.tool_calls, request.tool_names)
+            return RuntimeToolDirective(tool_blocks=parsed.tool_blocks, stop_reason=parsed.stop_reason)
 
-    if request.tools and state.answer_text:
-        tool_blocks, stop_reason = tool_parser.parse_tool_calls_silent(state.answer_text, request.tools)
-        return RuntimeToolDirective(tool_blocks=tool_blocks, stop_reason=stop_reason)
+        if request.tools and state.answer_text:
+            parsed = parse_textual_tool_calls(state.answer_text, request.tools)
+            return RuntimeToolDirective(tool_blocks=parsed.tool_blocks, stop_reason=parsed.stop_reason)
+    else:
+        if state.tool_calls:
+            return RuntimeToolDirective(
+                tool_blocks=[
+                    {
+                        "type": "tool_use",
+                        "id": tool_call["id"],
+                        "name": normalize_tool_name(tool_call["name"], request.tool_names),
+                        "input": tool_call.get("input", {}),
+                    }
+                    for tool_call in state.tool_calls
+                ],
+                stop_reason="tool_use",
+            )
+
+        if request.tools and state.answer_text:
+            tool_blocks, stop_reason = tool_parser.parse_tool_calls_silent(state.answer_text, request.tools)
+            return RuntimeToolDirective(tool_blocks=tool_blocks, stop_reason=stop_reason)
 
     return RuntimeToolDirective(tool_blocks=[{"type": "text", "text": state.answer_text}], stop_reason="end_turn")
 
