@@ -217,6 +217,67 @@ class V1ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"name": "Bash"', joined)
         self.assertNotIn('"name": "exec"', joined)
 
+    async def test_streaming_retry_does_not_leak_failed_attempt_text(self) -> None:
+        app = types.SimpleNamespace(
+            state=types.SimpleNamespace(
+                users_db=object(),
+                qwen_client=object(),
+                file_store=None,
+                session_locks=_DummyLocks(),
+                account_pool=types.SimpleNamespace(acquire_wait_preferred=AsyncMock(return_value=None)),
+            )
+        )
+        request = _FakeRequest(app, {"messages": [{"role": "user", "content": "hi"}], "stream": True})
+        standard_request = StandardRequest(
+            prompt="hi",
+            response_model="gpt-4.1",
+            resolved_model="qwen3.6-plus",
+            surface="openai",
+            stream=True,
+            client_profile="openclaw_openai",
+            tool_names=["exec"],
+            tools=[{"name": "exec", "parameters": {}}],
+            tool_enabled=True,
+        )
+        directive = types.SimpleNamespace(stop_reason="tool_use", tool_blocks=[{"type": "tool_use", "id": "call_1", "name": "exec", "input": {"command": "echo hi"}}])
+
+        async def fake_bridge(**kwargs):
+            on_attempt_start = kwargs["on_attempt_start"]
+            on_delta = kwargs["on_delta"]
+            on_retry = kwargs["on_retry"]
+
+            await on_attempt_start(0, "prompt")
+            await on_delta({"phase": "answer"}, "Tool exec does not exists.", None)
+            await on_retry(0, types.SimpleNamespace(reason="blocked_tool_name:exec"), types.SimpleNamespace())
+
+            await on_attempt_start(1, "prompt")
+            await on_delta({"phase": "tool_call"}, None, [{"id": "call_1", "name": "exec", "input": {"command": "echo hi"}}])
+            return types.SimpleNamespace(
+                execution=types.SimpleNamespace(state=types.SimpleNamespace(finish_reason="tool_calls", answer_text="", reasoning_text="", tool_calls=[{"id": "call_1", "name": "exec", "input": {"command": "echo hi"}}])),
+                directive=directive,
+            )
+
+        chunks = []
+        with patch.object(v1_chat, "resolve_auth_context", AsyncMock(return_value=types.SimpleNamespace(token="tok"))), \
+             patch.object(v1_chat, "derive_session_key", return_value="session"), \
+             patch.object(v1_chat, "prepare_context_attachments", AsyncMock(return_value={"payload": request._payload, "upstream_files": [], "session_key": "session", "context_mode": "inline", "bound_account_email": None, "bound_account": None})), \
+             patch.object(v1_chat, "_build_standard_request", return_value=standard_request), \
+             patch.object(v1_chat, "plan_persistent_session_turn", AsyncMock(return_value=types.SimpleNamespace(enabled=False))), \
+             patch.object(v1_chat, "run_retryable_completion_bridge", new=fake_bridge), \
+             patch.object(v1_chat, "build_tool_directive", return_value=directive), \
+             patch.object(v1_chat, "build_openai_assistant_history_message", return_value={"role": "assistant", "content": None, "tool_calls": []}), \
+             patch.object(v1_chat, "persist_session_turn", AsyncMock()), \
+             patch.object(v1_chat, "clear_invalidated_session_chat", AsyncMock()), \
+             patch.object(v1_chat, "update_request_context"):
+            response = await v1_chat.chat_completions(request)
+            self.assertIsInstance(response, StreamingResponse)
+            async for chunk in response.body_iterator:
+                chunks.append(chunk)
+
+        joined = "".join(chunks)
+        self.assertNotIn("Tool exec does not exists.", joined)
+        self.assertIn('"tool_calls"', joined)
+
 
 if __name__ == "__main__":
     unittest.main()

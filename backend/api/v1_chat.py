@@ -11,7 +11,7 @@ from backend.core.config import settings
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.services.attachment_preprocessor import preprocess_attachments
 from backend.services.context_attachment_manager import prepare_context_attachments, derive_session_key
-from backend.services.auth_quota import resolve_auth_context
+from backend.services.auth_quota import add_used_tokens, resolve_auth_context
 from backend.services.completion_bridge import run_retryable_completion_bridge
 from backend.services.openai_stream_translator import OpenAIStreamTranslator
 from backend.services.response_formatters import build_openai_completion_payload
@@ -132,54 +132,121 @@ async def chat_completions(request: Request):
                     async with app.state.session_locks.hold(session_key):
                         try:
                             update_request_context(stream_attempt=1)
-                            translator = OpenAIStreamTranslator(
-                                completion_id=completion_id,
-                                created=created,
-                                model_name=model_name,
-                                client_profile=standard_request.client_profile,
-                                build_final_directive=lambda answer_text: build_tool_directive(
-                                    standard_request,
-                                    RuntimeAttemptState(answer_text=answer_text),
-                                ),
-                                allowed_tool_names=standard_request.tool_names,
-                                toolcore_enabled=settings.TOOLCORE_V2_ENABLED,
-                            )
+                            if standard_request.tools:
+                                translator: OpenAIStreamTranslator | None = None
+                                staged_chunks: list[str] = []
 
-                            async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
-                                translator.on_delta(evt, text_chunk, tool_calls)
-                                while translator.pending_chunks:
-                                    await queue.put(translator.pending_chunks.pop(0))
+                                async def on_attempt_start(_attempt_index: int, _attempt_prompt: str) -> None:
+                                    nonlocal translator, staged_chunks
+                                    translator = OpenAIStreamTranslator(
+                                        completion_id=completion_id,
+                                        created=created,
+                                        model_name=model_name,
+                                        client_profile=standard_request.client_profile,
+                                        build_final_directive=lambda answer_text: build_tool_directive(
+                                            standard_request,
+                                            RuntimeAttemptState(answer_text=answer_text),
+                                        ),
+                                        allowed_tool_names=standard_request.tool_names,
+                                        toolcore_enabled=settings.TOOLCORE_V2_ENABLED,
+                                    )
+                                    staged_chunks = []
 
-                            result = await run_retryable_completion_bridge(
-                                client=client,
-                                standard_request=standard_request,
-                                prompt=prompt,
-                                users_db=users_db,
-                                token=token,
-                                history_messages=history_messages,
-                                max_attempts=request_max_attempts(standard_request),
-                                usage_delta_factory=build_usage_delta_factory(prompt),
-                                allow_after_visible_output=True,
-                                capture_events=False,
-                                on_delta=on_delta,
-                            )
-                            execution = result.execution
-                            directive = result.directive or build_tool_directive(standard_request, execution.state)
-                            assistant_message = build_openai_assistant_history_message(
-                                execution=execution,
-                                request=standard_request,
-                                directive=directive,
-                            )
-                            await persist_session_turn(
-                                app=app,
-                                request=standard_request,
-                                surface="openai",
-                                execution=execution,
-                                assistant_message=assistant_message,
-                            )
-                            final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
-                            for chunk in translator.finalize(final_finish_reason):
-                                await queue.put(chunk)
+                                async def on_retry(_attempt_index: int, _retry, _execution) -> None:
+                                    nonlocal staged_chunks
+                                    staged_chunks = []
+
+                                async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
+                                    if translator is None:
+                                        return
+                                    translator.on_delta(evt, text_chunk, tool_calls)
+                                    while translator.pending_chunks:
+                                        staged_chunks.append(translator.pending_chunks.pop(0))
+
+                                result = await run_retryable_completion_bridge(
+                                    client=client,
+                                    standard_request=standard_request,
+                                    prompt=prompt,
+                                    users_db=users_db,
+                                    token=token,
+                                    history_messages=history_messages,
+                                    max_attempts=request_max_attempts(standard_request),
+                                    usage_delta_factory=build_usage_delta_factory(prompt),
+                                    allow_after_visible_output=True,
+                                    capture_events=False,
+                                    on_delta=on_delta,
+                                    on_attempt_start=on_attempt_start,
+                                    on_retry=on_retry,
+                                )
+                                execution = result.execution
+                                directive = result.directive or build_tool_directive(standard_request, execution.state)
+                                assistant_message = build_openai_assistant_history_message(
+                                    execution=execution,
+                                    request=standard_request,
+                                    directive=directive,
+                                )
+                                await persist_session_turn(
+                                    app=app,
+                                    request=standard_request,
+                                    surface="openai",
+                                    execution=execution,
+                                    assistant_message=assistant_message,
+                                )
+                                final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
+                                for chunk in staged_chunks:
+                                    await queue.put(chunk)
+                                if translator is not None:
+                                    for chunk in translator.finalize(final_finish_reason):
+                                        await queue.put(chunk)
+                            else:
+                                translator = OpenAIStreamTranslator(
+                                    completion_id=completion_id,
+                                    created=created,
+                                    model_name=model_name,
+                                    client_profile=standard_request.client_profile,
+                                    build_final_directive=lambda answer_text: build_tool_directive(
+                                        standard_request,
+                                        RuntimeAttemptState(answer_text=answer_text),
+                                    ),
+                                    allowed_tool_names=standard_request.tool_names,
+                                    toolcore_enabled=settings.TOOLCORE_V2_ENABLED,
+                                )
+
+                                async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
+                                    translator.on_delta(evt, text_chunk, tool_calls)
+                                    while translator.pending_chunks:
+                                        await queue.put(translator.pending_chunks.pop(0))
+
+                                result = await run_retryable_completion_bridge(
+                                    client=client,
+                                    standard_request=standard_request,
+                                    prompt=prompt,
+                                    users_db=users_db,
+                                    token=token,
+                                    history_messages=history_messages,
+                                    max_attempts=request_max_attempts(standard_request),
+                                    usage_delta_factory=build_usage_delta_factory(prompt),
+                                    allow_after_visible_output=True,
+                                    capture_events=False,
+                                    on_delta=on_delta,
+                                )
+                                execution = result.execution
+                                directive = result.directive or build_tool_directive(standard_request, execution.state)
+                                assistant_message = build_openai_assistant_history_message(
+                                    execution=execution,
+                                    request=standard_request,
+                                    directive=directive,
+                                )
+                                await persist_session_turn(
+                                    app=app,
+                                    request=standard_request,
+                                    surface="openai",
+                                    execution=execution,
+                                    assistant_message=assistant_message,
+                                )
+                                final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
+                                for chunk in translator.finalize(final_finish_reason):
+                                    await queue.put(chunk)
                         except HTTPException as he:
                             await clear_invalidated_session_chat(app=app, request=standard_request)
                             await queue.put(f"data: {json.dumps({'error': he.detail})}\n\n")

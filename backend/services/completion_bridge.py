@@ -186,12 +186,16 @@ async def run_retryable_completion_bridge(
     allow_after_visible_output: bool = False,
     capture_events: bool = True,
     on_delta: Callable[[dict[str, Any], str | None, list[dict[str, Any]] | None], Awaitable[None]] | None = None,
+    on_attempt_start: Callable[[int, str], Awaitable[None]] | None = None,
+    on_retry: Callable[[int, RuntimeRetryDirective, Any], Awaitable[None]] | None = None,
 ) -> CompletionBridgeResult:
     current_prompt = prompt
     if not getattr(standard_request, 'full_prompt', None):
         standard_request.full_prompt = prompt
 
     for attempt_index in range(max_attempts):
+        if on_attempt_start is not None:
+            await on_attempt_start(attempt_index, current_prompt)
         execution = await collect_completion_run(
             client,
             standard_request,
@@ -209,6 +213,8 @@ async def run_retryable_completion_bridge(
             allow_after_visible_output=allow_after_visible_output,
         )
         if retry.retry:
+            if on_retry is not None:
+                await on_retry(attempt_index, retry, execution)
             preserve_chat = bool(getattr(standard_request, 'persistent_session', False))
             await cleanup_runtime_resources(client, execution.acc, execution.chat_id, preserve_chat=preserve_chat)
 
