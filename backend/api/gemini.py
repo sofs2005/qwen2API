@@ -1,17 +1,16 @@
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 import asyncio
-import json
 import logging
 from typing import Any
 
-from backend.adapter.standard_request import StandardRequest
 from backend.core.config import resolve_model
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.runtime import stream_presenter
-from backend.runtime.execution import collect_completion_run, cleanup_runtime_resources
+from backend.services.completion_bridge import run_retryable_completion_bridge
 from backend.services.auth_quota import resolve_auth_context
-from backend.services.token_calc import calculate_usage
+from backend.services.response_formatters import build_gemini_generate_payload
+from backend.services.standard_request_builder import build_chat_standard_request
 
 log = logging.getLogger("qwen2api.gemini")
 router = APIRouter()
@@ -19,16 +18,54 @@ router = APIRouter()
 GEMINI_STREAM_MEDIA_TYPE = "application/json"
 
 
-def _extract_gemini_prompt(body: dict) -> str:
-    lines: list[str] = []
+def _gemini_to_chat_payload(model: str, body: dict[str, Any], *, force_stream: bool | None = None) -> dict[str, Any]:
+    messages: list[dict[str, Any]] = []
     for message in body.get("contents", []) or []:
-        if message.get("role") != "user":
-            continue
+        role = "assistant" if message.get("role") == "model" else "user"
+        text_parts: list[str] = []
         for part in message.get("parts", []) or []:
             text = part.get("text")
             if text:
-                lines.append(text)
-    return "\n".join(lines)
+                text_parts.append(text)
+        if text_parts:
+            messages.append({"role": role, "content": "\n".join(text_parts)})
+
+    tools: list[dict[str, Any]] = []
+    for tool in body.get("tools", []) or []:
+        declarations = tool.get("functionDeclarations", []) if isinstance(tool, dict) else []
+        for declaration in declarations or []:
+            if not isinstance(declaration, dict):
+                continue
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": declaration.get("name", ""),
+                    "description": declaration.get("description", ""),
+                    "parameters": declaration.get("parameters", {}),
+                },
+            })
+
+    tool_choice: Any = None
+    tool_config = body.get("toolConfig")
+    if isinstance(tool_config, dict):
+        function_calling = tool_config.get("functionCallingConfig")
+        if isinstance(function_calling, dict):
+            mode = str(function_calling.get("mode") or "").strip().upper()
+            if mode == "NONE":
+                tool_choice = "none"
+            elif mode == "ANY":
+                tool_choice = "required"
+            elif mode == "AUTO":
+                tool_choice = "auto"
+
+    stream_requested = _is_gemini_stream_request(body) if force_stream is None else force_stream
+    return {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "stream": stream_requested,
+    }
 
 
 def _is_gemini_stream_request(body: dict[str, Any]) -> bool:
@@ -40,18 +77,9 @@ def _is_gemini_stream_request(body: dict[str, Any]) -> bool:
     return False
 
 
-def _build_standard_request(model: str, body: dict, *, stream: bool | None = None) -> StandardRequest:
-    prompt = _extract_gemini_prompt(body)
-    stream_requested = _is_gemini_stream_request(body) if stream is None else stream
-    return StandardRequest(
-        prompt=prompt,
-        response_model=model,
-        resolved_model=resolve_model(model),
-        surface="gemini",
-        requested_model=model,
-        content=prompt,
-        stream=stream_requested,
-    )
+def _build_standard_request(model: str, body: dict, *, stream: bool | None = None):
+    payload = _gemini_to_chat_payload(model, body, force_stream=stream)
+    return build_chat_standard_request(payload, default_model=model, surface="gemini", client_profile="openclaw_openai")
 
 
 def _gemini_chunk_payload(text: str) -> dict[str, Any]:
@@ -91,33 +119,23 @@ async def gemini_generate_content(model: str, request: Request):
         log.info(f"[Gemini] route=generateContent model={standard_request.resolved_model}, stream={standard_request.stream}, prompt_len={len(content)}")
 
         try:
-            execution = await collect_completion_run(client, standard_request, content)
+            result = await run_retryable_completion_bridge(
+                client=client,
+                standard_request=standard_request,
+                prompt=content,
+                users_db=users_db,
+                token=token,
+                history_messages=standard_request.tools and [] or [],
+                max_attempts=2 if standard_request.tools else 3,
+                allow_after_visible_output=True,
+            )
+            execution = result.execution
         except Exception as e:
             log.error(f"Gemini proxy failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-        usage = calculate_usage(content, execution.state.answer_text)
-        users = await users_db.get()
-        for u in users:
-            if u["id"] == token:
-                u["used_tokens"] += usage["total_tokens"]
-                break
-        await users_db.save(users)
-        await cleanup_runtime_resources(client, execution.acc, execution.chat_id)
-
         log.info(f"[Gemini] Request complete. Generated {len(execution.state.answer_text)} characters.")
-        return JSONResponse(
-            {
-                "candidates": [
-                    {
-                        "content": {
-                            "parts": [{"text": execution.state.answer_text}],
-                            "role": "model",
-                        }
-                    }
-                ]
-            }
-        )
+        return JSONResponse(build_gemini_generate_payload(execution=execution))
 
 
 @router.post("/v1beta/models/{model}:streamGenerateContent")
@@ -137,27 +155,22 @@ async def gemini_stream_generate_content(model: str, request: Request):
                     await queue.put(stream_presenter.gemini_text_chunk(text_chunk))
 
             async def runner():
-                execution = None
                 try:
-                    execution = await collect_completion_run(
-                        client,
-                        standard_request,
-                        content,
+                    result = await run_retryable_completion_bridge(
+                        client=client,
+                        standard_request=standard_request,
+                        prompt=content,
+                        users_db=users_db,
+                        token=token,
+                        history_messages=standard_request.tools and [] or [],
+                        max_attempts=2 if standard_request.tools else 3,
+                        allow_after_visible_output=True,
                         capture_events=False,
                         on_delta=on_delta,
                     )
-
-                    usage = calculate_usage(content, execution.state.answer_text)
-                    users = await users_db.get()
-                    for u in users:
-                        if u["id"] == token:
-                            u["used_tokens"] += usage["total_tokens"]
-                            break
-                    await users_db.save(users)
-                    await cleanup_runtime_resources(client, execution.acc, execution.chat_id)
-                    log.info(f"[Gemini] Request complete. Generated {len(execution.state.answer_text)} characters.")
+                    log.info(f"[Gemini] Request complete. Generated {len(result.execution.state.answer_text)} characters.")
                 except Exception as e:
-                    await queue.put(json.dumps({"error": str(e)}) + "\n")
+                    await queue.put(stream_presenter.gemini_error_chunk(str(e)))
                 finally:
                     await queue.put(None)
 
