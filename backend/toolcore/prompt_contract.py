@@ -93,47 +93,6 @@ def _tool_usage_line(tool: dict[str, Any], *, max_desc: int = 40, max_keys: int 
     return line
 
 
-def _find_tool_by_name(tools: list[dict[str, Any]], desired_name: str) -> dict[str, Any] | None:
-    desired = str(desired_name or "").strip().lower()
-    for tool in tools:
-        actual = str(tool.get("name", "")).strip().lower()
-        if actual == desired:
-            return tool
-    return None
-
-
-def _preferred_tool_lines(
-    tools: list[dict[str, Any]],
-    priority_names: list[str],
-    *,
-    max_remaining: int = 20,
-    max_desc: int = 40,
-    max_keys: int = 3,
-) -> list[str]:
-    lines: list[str] = []
-    seen: set[str] = set()
-    for priority_name in priority_names:
-        tool = _find_tool_by_name(tools, priority_name)
-        if tool is None:
-            continue
-        actual_name = str(tool.get("name", "")).strip()
-        actual_key = actual_name.lower()
-        if not actual_name or actual_key in seen:
-            continue
-        seen.add(actual_key)
-        lines.append(_tool_usage_line(tool, max_desc=max_desc, max_keys=max_keys))
-    remaining_names = [
-        str(tool.get("name", "")).strip()
-        for tool in tools
-        if str(tool.get("name", "")).strip() and str(tool.get("name", "")).strip().lower() not in seen
-    ]
-    if remaining_names:
-        lines.append(f"- Other available tools: {', '.join(remaining_names[:max_remaining])}")
-        if len(remaining_names) > max_remaining:
-            lines.append(f"  ... and {len(remaining_names) - max_remaining} more")
-    return lines
-
-
 def build_tool_instruction_block(
     tools: list[dict[str, Any]],
     client_profile: str,
@@ -189,17 +148,13 @@ def build_tool_instruction_block(
         *([""] if force_constraint_lines else []),
         "Available tools (use these EXACT names):",
     ]
-    if client_profile == QWEN_CODE_OPENAI_PROFILE and len(names) > 16:
-        priority_tools = ["read", "read_file", "write", "write_file", "edit", "multiedit", "bash", "run_command", "grep", "glob", "webfetch", "websearch"]
-        lines.extend(_preferred_tool_lines(tools, priority_tools, max_desc=72, max_keys=6))
-    elif client_profile == CLAUDE_CODE_OPENAI_PROFILE and len(names) > 12:
-        priority_tools = ["read", "write", "edit", "bash", "glob", "grep", "websearch", "webfetch", "agent", "taskcreate", "taskupdate", "askuserquestion"]
-        lines.extend(_preferred_tool_lines(tools, priority_tools))
-    elif client_profile == OPENCLAW_OPENAI_PROFILE and len(names) > 12:
-        priority_tools = ["read", "write", "edit", "bash", "glob", "grep", "webfetch", "websearch", "task", "skill", "todowrite", "question"]
-        lines.extend(_preferred_tool_lines(tools, priority_tools))
-    else:
-        for tool in tools:
-            lines.append(_tool_usage_line(tool, max_desc=72 if client_profile == QWEN_CODE_OPENAI_PROFILE else 40, max_keys=6 if client_profile == QWEN_CODE_OPENAI_PROFILE else 3))
+    for tool in tools:
+        lines.append(
+            _tool_usage_line(
+                tool,
+                max_desc=72 if client_profile == QWEN_CODE_OPENAI_PROFILE else 40,
+                max_keys=6 if client_profile == QWEN_CODE_OPENAI_PROFILE else 3,
+            )
+        )
     lines.append("=== END TOOL INSTRUCTIONS ===")
     return "\n".join(lines)

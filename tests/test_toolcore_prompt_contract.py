@@ -39,6 +39,32 @@ class PromptContractTests(unittest.TestCase):
         rendered = render_history_tool_call("Read", {"file_path": "README.md"}, CLAUDE_CODE_OPENAI_PROFILE)
         self.assertEqual(rendered, '##TOOL_CALL##\n{"name": "Read", "input": {"file_path": "README.md"}}\n##END_CALL##')
 
+    def test_large_tool_list_preserves_client_declared_order(self) -> None:
+        tools = normalize_prompt_tools(
+            [
+                {"name": "tool_01", "description": "custom one", "parameters": {}},
+                {"name": "tool_02", "description": "custom two", "parameters": {}},
+                {"name": "tool_03", "description": "custom three", "parameters": {}},
+                {"name": "tool_04", "description": "custom four", "parameters": {}},
+                {"name": "tool_05", "description": "custom five", "parameters": {}},
+                {"name": "tool_06", "description": "custom six", "parameters": {}},
+                {"name": "tool_07", "description": "custom seven", "parameters": {}},
+                {"name": "tool_08", "description": "custom eight", "parameters": {}},
+                {"name": "tool_09", "description": "custom nine", "parameters": {}},
+                {"name": "tool_10", "description": "custom ten", "parameters": {}},
+                {"name": "tool_11", "description": "custom eleven", "parameters": {}},
+                {"name": "tool_12", "description": "custom twelve", "parameters": {}},
+                {"name": "tool_13", "description": "custom thirteen", "parameters": {}},
+            ]
+        )
+
+        contract = build_tool_instruction_block(tools, OPENCLAW_OPENAI_PROFILE)
+
+        self.assertIn("- tool_01: custom one", contract)
+        self.assertIn("- tool_13: custom thirteen", contract)
+        self.assertLess(contract.index("- tool_01: custom one"), contract.index("- tool_13: custom thirteen"))
+        self.assertNotIn("Other available tools:", contract)
+
 
 if __name__ == "__main__":
     unittest.main()
