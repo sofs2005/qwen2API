@@ -137,6 +137,7 @@ __all__ = [
     "has_recent_unchanged_read_result",
     "inject_assistant_message",
     "native_tool_calls_to_markup",
+    "normalize_streamed_tool_calls",
     "parse_tool_directive_once",
     "plan_runtime_attempts",
     "recent_same_tool_identity_count",
@@ -169,6 +170,17 @@ def extract_blocked_tool_names(text: str, allowed_tool_names: list[str] | None =
     if not allowed_tool_names:
         return blocked
     return [normalize_tool_name(name, allowed_tool_names) for name in blocked]
+
+
+def normalize_streamed_tool_calls(tool_calls: list[dict[str, Any]], allowed_tool_names: list[str] | None = None) -> list[dict[str, Any]]:
+    normalized_calls: list[dict[str, Any]] = []
+    for tool_call in tool_calls or []:
+        if not isinstance(tool_call, dict):
+            continue
+        updated = dict(tool_call)
+        updated["name"] = normalize_tool_name(str(tool_call.get("name", "")), allowed_tool_names or [])
+        normalized_calls.append(updated)
+    return normalized_calls
 
 
 def _recent_message_texts(messages: list[dict[str, Any]] | None, *, limit: int = 10) -> list[str]:
@@ -650,6 +662,7 @@ async def collect_completion_run(
                 first_event_marked = True
             completed_calls = tool_state.process_event(evt)
             if completed_calls:
+                completed_calls = normalize_streamed_tool_calls(completed_calls, request.tool_names)
                 native_tool_calls.extend(completed_calls)
                 if on_delta is not None:
                     await on_delta(evt, None, completed_calls)
