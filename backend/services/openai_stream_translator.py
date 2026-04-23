@@ -4,8 +4,9 @@ import json
 from typing import Any, Callable
 
 from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE
-from backend.runtime.execution import RuntimeToolDirective
 from backend.toolcall.parser import parse_tool_calls_detailed
+from backend.runtime.execution import RuntimeToolDirective
+from backend.toolcore.stream_sieve import looks_like_tool_fragment
 
 
 STRICT_TOOL_TEXT_PREFIXES = ("{", "[", "`", "<")
@@ -24,6 +25,7 @@ class OpenAIStreamTranslator:
         client_profile: str,
         build_final_directive: Callable[[str], RuntimeToolDirective] | None = None,
         allowed_tool_names: list[str] | None = None,
+        toolcore_enabled: bool = True,
     ):
         self.completion_id = completion_id
         self.created = created
@@ -31,6 +33,7 @@ class OpenAIStreamTranslator:
         self.client_profile = client_profile
         self.build_final_directive = build_final_directive
         self.allowed_tool_names = {name for name in (allowed_tool_names or []) if isinstance(name, str) and name}
+        self.toolcore_enabled = toolcore_enabled
         self.pending_chunks: list[str] = []
         self.role_chunk_sent = False
         self.emitted_tool_index = 0
@@ -61,12 +64,19 @@ class OpenAIStreamTranslator:
         if any(marker in lowered for marker in common_markers):
             return True
         if self.allowed_tool_names:
-            detailed = parse_tool_calls_detailed(text_chunk, self.allowed_tool_names)
-            if detailed.get("saw_tool_syntax"):
-                if self.tool_text_detection_mode == "strict_prefix":
-                    stripped = text_chunk.lstrip()
-                    return stripped.startswith(STRICT_TOOL_TEXT_PREFIXES)
-                return True
+            if self.toolcore_enabled:
+                if looks_like_tool_fragment(text_chunk):
+                    if self.tool_text_detection_mode == "strict_prefix":
+                        stripped = text_chunk.lstrip()
+                        return stripped.startswith(STRICT_TOOL_TEXT_PREFIXES)
+                    return True
+            else:
+                detailed = parse_tool_calls_detailed(text_chunk, self.allowed_tool_names)
+                if detailed.get("saw_tool_syntax"):
+                    if self.tool_text_detection_mode == "strict_prefix":
+                        stripped = text_chunk.lstrip()
+                        return stripped.startswith(STRICT_TOOL_TEXT_PREFIXES)
+                    return True
         return False
 
     def _should_finalize_tool_calls(self, directive: RuntimeToolDirective) -> bool:
