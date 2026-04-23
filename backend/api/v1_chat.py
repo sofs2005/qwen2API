@@ -142,6 +142,7 @@ async def chat_completions(request: Request):
                                     RuntimeAttemptState(answer_text=answer_text),
                                 ),
                                 allowed_tool_names=standard_request.tool_names,
+                                toolcore_enabled=settings.TOOLCORE_V2_ENABLED,
                             )
 
                             async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
