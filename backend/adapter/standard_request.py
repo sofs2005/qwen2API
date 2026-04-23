@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.runtime.attachment_types import NormalizedAttachment
+from backend.toolcall.normalize import normalize_tool_name
 from backend.services.client_profiles import (
     CLAUDE_CODE_OPENAI_PROFILE,
     OPENCLAW_OPENAI_PROFILE,
@@ -51,6 +52,16 @@ def normalize_tool_choice(tool_choice: Any) -> ToolChoiceSpec:
         if required_tool_name:
             return ToolChoiceSpec(mode="required", required_tool_name=required_tool_name, raw=tool_choice)
     return ToolChoiceSpec(mode="auto", raw=tool_choice)
+
+
+def enforce_declared_tool_choice(tool_choice: ToolChoiceSpec, allowed_tool_names: list[str]) -> ToolChoiceSpec:
+    if not tool_choice.required_tool_name:
+        return tool_choice
+    normalized_name = normalize_tool_name(tool_choice.required_tool_name, allowed_tool_names)
+    if allowed_tool_names and normalized_name not in allowed_tool_names:
+        raise ValueError(f"tool_choice references undeclared tool {tool_choice.required_tool_name}")
+    tool_choice.required_tool_name = normalized_name
+    return tool_choice
 
 
 @dataclass(slots=True)

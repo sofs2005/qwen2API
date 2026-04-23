@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from backend.adapter.standard_request import StandardRequest
+from backend.adapter.standard_request import StandardRequest, enforce_declared_tool_choice
 from backend.core.config import resolve_model, settings
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.runtime import stream_presenter
@@ -134,6 +134,7 @@ def _build_standard_request(req_data: dict) -> StandardRequest:
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]
     tool_choice = normalize_tool_choice(req_data.get("tool_choice"))
+    tool_choice = enforce_declared_tool_choice(tool_choice, tool_names)
     return StandardRequest(
         prompt=prompt,
         response_model=model_name,
