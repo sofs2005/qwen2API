@@ -13,6 +13,7 @@ STRICT_TOOL_TEXT_PREFIXES = ("{", "[", "`", "<")
 BUFFERED_TOOL_CALLS_ONLY = "buffered_tool_calls_only"
 DIRECTIVE_DRIVEN_TOOL_CALLS = "directive_driven_tool_calls"
 TOOL_ARGUMENT_CHUNK_SIZE = 128
+PARTIAL_TOOL_MARKERS = ("##tool_call##", '<tool_call>', 'function.name:', '{"name":')
 
 
 class OpenAIStreamTranslator:
@@ -41,6 +42,7 @@ class OpenAIStreamTranslator:
         self.buffered_toolish_fragments: list[str] = []
         self.pending_content_chunks: list[str] = []
         self.tool_calls_emitted = False
+        self.pending_tool_prefix_fragment = ""
         self.tool_text_detection_mode = self._resolve_tool_text_detection_mode(client_profile)
         self.tool_call_finalize_mode = self._resolve_tool_call_finalize_mode(client_profile)
 
@@ -113,6 +115,22 @@ class OpenAIStreamTranslator:
         self.pending_chunks = [chunk for chunk in self.pending_chunks if id(chunk) not in pending_content_ids]
         self.pending_content_chunks = []
 
+    def _split_safe_content_for_tool_detection(self, text: str) -> tuple[str, str]:
+        lowered = text.lower()
+        best_hold = ""
+        for marker in PARTIAL_TOOL_MARKERS:
+            max_check = min(len(marker) - 1, len(lowered))
+            for size in range(max_check, 0, -1):
+                suffix = lowered[-size:]
+                if marker.startswith(suffix):
+                    candidate_hold = text[-size:]
+                    if len(candidate_hold) > len(best_hold):
+                        best_hold = candidate_hold
+                    break
+        if not best_hold:
+            return text, ""
+        return text[:-len(best_hold)], best_hold
+
     def on_delta(self, evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
         self._ensure_role_chunk()
 
@@ -120,13 +138,18 @@ class OpenAIStreamTranslator:
             return
 
         if text_chunk and evt.get("phase") == "answer":
-            self.answer_fragments.append(text_chunk)
-            if self._looks_like_tool_output(text_chunk):
-                self.buffered_toolish_fragments.append(text_chunk)
+            combined_chunk = f"{self.pending_tool_prefix_fragment}{text_chunk}"
+            self.pending_tool_prefix_fragment = ""
+            self.answer_fragments.append(combined_chunk)
+            if self._looks_like_tool_output(combined_chunk):
+                self.buffered_toolish_fragments.append(combined_chunk)
             elif self.buffered_toolish_fragments:
-                self.buffered_toolish_fragments.append(text_chunk)
+                self.buffered_toolish_fragments.append(combined_chunk)
             else:
-                self._emit_content_chunk(text_chunk)
+                safe_text, hold_text = self._split_safe_content_for_tool_detection(combined_chunk)
+                if safe_text:
+                    self._emit_content_chunk(safe_text)
+                self.pending_tool_prefix_fragment = hold_text
             return
 
         if tool_calls:
@@ -151,6 +174,8 @@ class OpenAIStreamTranslator:
     def finalize(self, finish_reason: str) -> list[str]:
         final_finish_reason = finish_reason
         buffered_text = "".join(self.buffered_toolish_fragments)
+        trailing_fragment = self.pending_tool_prefix_fragment
+        self.pending_tool_prefix_fragment = ""
         if self.build_final_directive is not None and not self.tool_calls_emitted:
             directive = self.build_final_directive("".join(self.answer_fragments))
             if self._should_finalize_tool_calls(directive):
@@ -171,6 +196,8 @@ class OpenAIStreamTranslator:
                 self._emit_content_chunk(buffered_text)
         elif buffered_text and not self.tool_calls_emitted:
             self._emit_content_chunk(buffered_text)
+        if trailing_fragment and final_finish_reason != "tool_calls":
+            self._emit_content_chunk(trailing_fragment)
 
         chunks = list(self.pending_chunks)
         chunks.append(

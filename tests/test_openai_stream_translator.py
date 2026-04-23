@@ -1,0 +1,69 @@
+import json
+import unittest
+
+from backend.services.openai_stream_translator import OpenAIStreamTranslator
+
+
+class OpenAIStreamTranslatorTests(unittest.TestCase):
+    def test_emit_tool_calls_splits_arguments_into_multiple_chunks(self) -> None:
+        translator = OpenAIStreamTranslator(
+            completion_id="chatcmpl_test",
+            created=1,
+            model_name="gpt-4.1",
+            client_profile="openclaw_openai",
+        )
+
+        translator.emit_tool_calls([
+            {
+                "id": "call_1",
+                "name": "Read",
+                "input": {"file_path": "a" * 300},
+            }
+        ])
+
+        payloads = [json.loads(chunk[6:].strip()) for chunk in translator.pending_chunks if chunk.startswith("data: ")]
+        tool_call_chunks = [payload["choices"][0]["delta"]["tool_calls"][0] for payload in payloads if payload["choices"][0]["delta"].get("tool_calls")]
+
+        self.assertEqual(tool_call_chunks[0]["function"]["name"], "Read")
+        self.assertEqual(tool_call_chunks[0]["function"]["arguments"], "")
+        rebuilt = "".join(chunk["function"].get("arguments", "") for chunk in tool_call_chunks[1:])
+        self.assertEqual(rebuilt, json.dumps({"file_path": "a" * 300}, ensure_ascii=False))
+        self.assertGreater(len(tool_call_chunks), 2)
+
+    def test_finalize_drops_incomplete_tool_wrapper_text_when_valid_tool_call_exists(self) -> None:
+        directive = type(
+            "Directive",
+            (),
+            {
+                "stop_reason": "tool_use",
+                "tool_blocks": [{"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "README.md"}}],
+            },
+        )()
+        translator = OpenAIStreamTranslator(
+            completion_id="chatcmpl_test",
+            created=1,
+            model_name="gpt-4.1",
+            client_profile="openclaw_openai",
+            build_final_directive=lambda _text: directive,
+            allowed_tool_names=["Read"],
+            toolcore_enabled=True,
+        )
+
+        translator.on_delta({"phase": "answer"}, '##TOOL_CALL##\n{"name": "exec", "input": {"command": "ls -la', None)
+        translator.on_delta({"phase": "answer"}, ' /tmp"}}\n##TOOL_CALL##\n{"name": "Read", "input": {"path": "README.md"}}\n##END_CALL##', None)
+
+        chunks = translator.finalize("stop")
+        payloads = [json.loads(chunk[6:].strip()) for chunk in chunks if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"]
+        content_text = "".join(
+            payload["choices"][0]["delta"].get("content", "")
+            for payload in payloads
+            if payload["choices"][0]["delta"].get("content")
+        )
+        emitted_tool_calls = [payload for payload in payloads if payload["choices"][0]["delta"].get("tool_calls")]
+
+        self.assertEqual(content_text, "")
+        self.assertTrue(emitted_tool_calls)
+
+
+if __name__ == "__main__":
+    unittest.main()
