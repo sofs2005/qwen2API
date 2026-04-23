@@ -8,6 +8,17 @@ from backend.runtime.execution import build_tool_directive
 from backend.toolcore.roundtrip import build_response_function_call_item
 
 
+def sanitize_visible_answer_text(answer_text: str, *, tool_use: bool) -> str:
+    text = answer_text or ""
+    if not tool_use or not text:
+        return text
+    markers = [marker for marker in ("##TOOL_CALL##", "<tool_call>") if marker in text]
+    if not markers:
+        return text
+    first_index = min(text.index(marker) for marker in markers)
+    return text[:first_index].strip()
+
+
 def build_openai_completion_payload(*, completion_id: str, created: int, model_name: str, prompt: str, execution, standard_request) -> dict[str, Any]:
     directive = build_tool_directive(standard_request, execution.state)
     if directive.stop_reason == "tool_use":
@@ -72,10 +83,11 @@ def build_openai_response_payload(
     store: bool = True,
 ) -> dict[str, Any]:
     directive = build_tool_directive(standard_request, execution.state)
-    answer_text = execution.state.answer_text or ""
+    raw_answer_text = execution.state.answer_text or ""
     output: list[dict[str, Any]] = []
 
     if directive.stop_reason == "tool_use":
+        answer_text = sanitize_visible_answer_text(raw_answer_text, tool_use=True)
         if answer_text:
             output.append(
                 {
@@ -97,6 +109,7 @@ def build_openai_response_payload(
                 continue
             output.append(build_response_function_call_item(call_id=block["id"], name=block["name"], input_data=block.get("input", {})))
     else:
+        answer_text = sanitize_visible_answer_text(raw_answer_text, tool_use=False)
         output.append(
             {
                 "id": f"msg_{uuid.uuid4().hex[:24]}",

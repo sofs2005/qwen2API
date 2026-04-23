@@ -9,11 +9,13 @@ from typing import Any
 
 from backend.adapter.standard_request import StandardRequest
 from backend.runtime.execution import build_tool_directive
+from backend.services.response_formatters import sanitize_visible_answer_text
 from backend.toolcore.roundtrip import (
     build_response_function_call_item,
     response_function_call_to_message,
     response_function_output_to_message,
 )
+from backend.toolcore.stream_sieve import looks_like_tool_fragment
 
 log = logging.getLogger("qwen2api.responses")
 TOOL_ARGUMENT_CHUNK_SIZE = 128
@@ -167,6 +169,7 @@ class ResponsesStreamTranslator:
         self.text_item_started = False
         self.tool_item_ids: set[str] = set()
         self.streamed_tool_item_ids: set[str] = set()
+        self.buffered_toolish_fragments: list[str] = []
 
     def _next_sequence(self) -> int:
         self.sequence_number += 1
@@ -201,7 +204,12 @@ class ResponsesStreamTranslator:
             )
         )
 
-    def on_text_delta(self, delta: str) -> None:
+    def _looks_like_tool_output(self, delta: str) -> bool:
+        lowered = (delta or "").lower()
+        common_markers = ("##tool_call##", "##end_call##", "function.name:", "<tool_call>")
+        return any(marker in lowered for marker in common_markers) or looks_like_tool_fragment(delta)
+
+    def _emit_text_delta(self, delta: str) -> None:
         if not delta:
             return
         if not self.text_item_started:
@@ -249,6 +257,14 @@ class ResponsesStreamTranslator:
             )
         )
 
+    def on_text_delta(self, delta: str) -> None:
+        if not delta:
+            return
+        if self._looks_like_tool_output(delta) or self.buffered_toolish_fragments:
+            self.buffered_toolish_fragments.append(delta)
+            return
+        self._emit_text_delta(delta)
+
     def on_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
         for tool_call in tool_calls:
             call_id = str(tool_call.get("id") or "").strip()
@@ -273,9 +289,12 @@ class ResponsesStreamTranslator:
         standard_request: StandardRequest,
         execution: Any,
     ) -> list[str]:
-        chunks = list(self.pending_chunks)
-        answer_text = execution.state.answer_text or ""
         directive = build_tool_directive(standard_request, execution.state)
+        if directive.stop_reason != "tool_use" and self.buffered_toolish_fragments:
+            self._emit_text_delta("".join(self.buffered_toolish_fragments))
+        self.buffered_toolish_fragments = []
+        chunks = list(self.pending_chunks)
+        answer_text = sanitize_visible_answer_text(execution.state.answer_text or "", tool_use=directive.stop_reason == "tool_use")
 
         if directive.stop_reason == "tool_use":
             output_index = 0
