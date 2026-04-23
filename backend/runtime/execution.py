@@ -307,7 +307,12 @@ def recent_same_tool_identity_count(messages: list[dict[str, Any]] | None, tool_
     count = 0
     started = False
     for msg in reversed(messages or []):
-        if msg.get("role") != "assistant":
+        role = msg.get("role")
+        if role == "user":
+            break
+        if role != "assistant":
+            if started and role == "assistant":
+                break
             continue
         tools = _assistant_tool_uses(msg)
         if not tools:

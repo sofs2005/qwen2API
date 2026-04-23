@@ -130,7 +130,9 @@ class V1ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def fake_bridge(**kwargs):
+            on_attempt_start = kwargs["on_attempt_start"]
             on_delta = kwargs["on_delta"]
+            await on_attempt_start(0, "prompt")
             await on_delta({"phase": "answer"}, "##TOOL_C", None)
             await on_delta({"phase": "answer"}, 'ALL##\n{"name": "Read", "input": {"file_path": "README.md"}}\n##END_CALL##', None)
             return types.SimpleNamespace(
@@ -184,7 +186,9 @@ class V1ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
         directive = types.SimpleNamespace(stop_reason="tool_use", tool_blocks=[{"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"command": "echo hi"}}])
 
         async def fake_bridge(**kwargs):
+            on_attempt_start = kwargs["on_attempt_start"]
             on_delta = kwargs["on_delta"]
+            await on_attempt_start(0, "prompt")
             normalized_calls = normalize_streamed_tool_calls(
                 [{"id": "call_1", "name": "exec", "input": {"command": "echo hi"}}],
                 standard_request.tool_names,
