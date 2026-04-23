@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -12,6 +13,7 @@ def sanitize_visible_answer_text(answer_text: str, *, tool_use: bool) -> str:
     text = answer_text or ""
     if not tool_use or not text:
         return text
+    text = re.sub(r"(?im)^Tool\s+[A-Za-z0-9_.:-]+\s+does not exists?\.?\s*", "", text).strip()
     markers = [marker for marker in ("##TOOL_CALL##", "<tool_call>") if marker in text]
     if not markers:
         return text

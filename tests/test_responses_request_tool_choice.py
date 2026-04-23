@@ -82,6 +82,36 @@ class ResponsesToolChoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payload["output"]), 1)
         self.assertEqual(payload["output"][0]["type"], "function_call")
 
+    async def test_response_payload_drops_blocked_exec_text_when_tool_use_exists(self) -> None:
+        request = StandardRequest(
+            prompt="hello",
+            response_model="gpt-4.1",
+            resolved_model="qwen3.6-plus",
+            surface="responses",
+            tools=[{"name": "Bash", "parameters": {}}],
+            tool_names=["Bash"],
+            tool_enabled=True,
+        )
+        execution = SimpleNamespace(
+            state=SimpleNamespace(
+                answer_text="Tool exec does not exists.",
+                reasoning_text="",
+                tool_calls=[{"id": "call_1", "name": "exec", "input": {"command": "echo hi"}}],
+            )
+        )
+
+        payload = build_openai_response_payload(
+            response_id="resp_test",
+            created=1,
+            model_name="gpt-4.1",
+            prompt="hello",
+            execution=execution,
+            standard_request=request,
+        )
+
+        self.assertEqual(payload["output_text"], "")
+        self.assertEqual(payload["output"][0]["name"], "Bash")
+
 
 if __name__ == "__main__":
     unittest.main()
