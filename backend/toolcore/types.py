@@ -17,6 +17,9 @@ class ToolDefinition:
     name: str
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
+    client_name: str | None = None
+    model_name: str | None = None
+    aliases: tuple[str, ...] = ()
     raw: dict[str, Any] | None = None
 
 
@@ -43,3 +46,4 @@ class ToolCoreRequest:
     tool_calls: list[CanonicalToolCall] = field(default_factory=list)
     tool_results: list[CanonicalToolResult] = field(default_factory=list)
     raw_tool_choice: Any | None = None
+    tool_catalog: Any | None = None
