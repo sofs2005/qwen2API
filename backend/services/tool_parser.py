@@ -9,6 +9,7 @@ from backend.core.request_logging import get_request_context
 from backend.toolcall.formats_json import load_json_with_repair
 from backend.toolcall.normalize import build_tool_name_registry, normalize_tool_name
 from backend.toolcall.parser import parse_tool_calls_detailed
+from backend.toolcore.directive_parser import parse_textual_tool_calls
 
 __all__ = ["parse_tool_calls", "parse_tool_calls_detailed", "inject_format_reminder", "parse_tool_calls_silent", "ToolSieve"]
 
@@ -400,11 +401,42 @@ def _coerce_tool_input(name: str, input_data: Any, tools: list[dict[str, Any]]) 
 
 
 def parse_tool_calls(answer: str, tools: list):
-    return _parse_tool_calls(answer, tools, emit_logs=True)
+    return _parse_tool_calls_via_toolcore(answer, tools, emit_logs=True)
 
 
 def parse_tool_calls_silent(answer: str, tools: list):
-    return _parse_tool_calls(answer, tools, emit_logs=False)
+    return _parse_tool_calls_via_toolcore(answer, tools, emit_logs=False)
+
+
+def _parse_tool_calls_via_toolcore(answer: str, tools: list, *, emit_logs: bool):
+    ctx = get_request_context()
+    req_tag = f"req={ctx.get('req_id', '-')} chat={ctx.get('chat_id', '-')}"
+    if emit_logs:
+        log.info(f"[ToolParse] [{req_tag}] 原始回复({len(answer)}字): {answer[:500]!r}")
+    result = parse_textual_tool_calls(answer, tools)
+    if not tools:
+        return result.tool_blocks, result.stop_reason
+
+    tool_names = {_tool_name(t) for t in tools if _tool_name(t)}
+    coerced_blocks: list[dict[str, Any]] = []
+    for block in result.tool_blocks:
+        if block.get("type") != "tool_use":
+            coerced_blocks.append(block)
+            continue
+        name = str(block.get("name") or "")
+        normalized_name = normalize_tool_name(name, tool_names)
+        if normalized_name not in tool_names:
+            coerced_blocks.append({"type": "text", "text": answer})
+            return coerced_blocks, "end_turn"
+        coerced_blocks.append(
+            {
+                "type": "tool_use",
+                "id": block.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
+                "name": normalized_name,
+                "input": _coerce_tool_input(normalized_name, block.get("input", {}), tools),
+            }
+        )
+    return coerced_blocks, result.stop_reason
 
 
 def _parse_tool_calls(answer: str, tools: list, *, emit_logs: bool):

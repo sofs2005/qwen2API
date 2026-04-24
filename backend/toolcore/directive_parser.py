@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.toolcall.formats_json import load_json_with_repair
+from backend.toolcall.normalize import normalize_arguments, normalize_tool_name
+from backend.toolcall.parser import parse_tool_calls_detailed
 from backend.toolcall.normalize import normalize_tool_name
 from backend.toolcore.types import CanonicalToolCall
-from backend.services import tool_parser
 
 
 @dataclass(slots=True)
@@ -36,7 +39,62 @@ def parse_state_tool_calls(state_tool_calls: list[dict[str, Any]], allowed_tool_
 def parse_textual_tool_calls(answer_text: str, tools: list[dict[str, Any]]) -> ToolDirectiveParseResult:
     if not tools or not answer_text:
         return ToolDirectiveParseResult(tool_blocks=[{"type": "text", "text": answer_text}], stop_reason="end_turn")
-    tool_blocks, stop_reason = tool_parser.parse_tool_calls_silent(answer_text, tools)
+    tool_names = {str(tool.get("name", "")).strip() for tool in tools if isinstance(tool, dict) and str(tool.get("name", "")).strip()}
+    tool_blocks: list[dict[str, Any]] = []
+    stop_reason = "end_turn"
+
+    tc_matches = list(re.finditer(r'##TOOL_CALL##\s*(.*?)\s*##END_CALL##', answer_text, re.DOTALL | re.IGNORECASE))
+    if tc_matches:
+        cursor = 0
+        for match in tc_matches:
+            prefix = answer_text[cursor:match.start()].strip()
+            if prefix:
+                tool_blocks.append({"type": "text", "text": prefix})
+            try:
+                obj = load_json_with_repair(match.group(1))
+                if isinstance(obj, dict) and obj.get("name"):
+                    raw_name = str(obj.get("name", ""))
+                    normalized_name = normalize_tool_name(raw_name, tool_names)
+                    raw_input = obj.get("input", obj.get("args", obj.get("arguments", obj.get("parameters", {}))))
+                    if normalized_name in tool_names:
+                        tool_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": f"toolu_{len(tool_blocks)}",
+                                "name": normalized_name,
+                                "input": normalize_arguments(raw_input),
+                            }
+                        )
+                        stop_reason = "tool_use"
+                    else:
+                        tool_blocks.append({"type": "text", "text": answer_text[match.start():match.end()].strip()})
+                else:
+                    tool_blocks.append({"type": "text", "text": answer_text[match.start():match.end()].strip()})
+            except Exception:
+                tool_blocks.append({"type": "text", "text": answer_text[match.start():match.end()].strip()})
+            cursor = match.end()
+        suffix = answer_text[cursor:].strip()
+        if suffix:
+            tool_blocks.append({"type": "text", "text": suffix})
+    else:
+        detailed = parse_tool_calls_detailed(answer_text, tool_names)
+        detailed_calls = detailed.get("calls", []) if isinstance(detailed, dict) else []
+        if isinstance(detailed_calls, list) and detailed_calls:
+            for index, call in enumerate(detailed_calls):
+                if not isinstance(call, dict):
+                    continue
+                tool_blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": f"toolu_{index}",
+                        "name": str(call.get("name", "")).strip(),
+                        "input": call.get("input", {}) if isinstance(call.get("input", {}), dict) else {},
+                    }
+                )
+            stop_reason = "tool_use"
+        else:
+            tool_blocks = [{"type": "text", "text": answer_text}]
+
     canonical_calls: list[CanonicalToolCall] = []
     for block in tool_blocks:
         if block.get("type") != "tool_use" or not block.get("id") or not block.get("name"):
