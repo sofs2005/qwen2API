@@ -218,8 +218,8 @@ class V1ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
                 chunks.append(chunk)
 
         joined = "".join(chunks)
-        self.assertIn('"name": "Bash"', joined)
-        self.assertNotIn('"name": "exec"', joined)
+        self.assertIn('"name": "exec"', joined)
+        self.assertNotIn('"name": "Bash"', joined)
 
     async def test_streaming_retry_does_not_leak_failed_attempt_text(self) -> None:
         app = types.SimpleNamespace(

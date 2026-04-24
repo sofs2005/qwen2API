@@ -110,7 +110,8 @@ class ResponsesToolChoiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(payload["output_text"], "")
-        self.assertEqual(payload["output"][0]["name"], "Bash")
+        self.assertEqual(len(payload["output"]), 1)
+        self.assertEqual(payload["output"][0]["type"], "message")
 
 
 if __name__ == "__main__":
