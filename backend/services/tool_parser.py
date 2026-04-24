@@ -16,7 +16,7 @@ __all__ = ["parse_tool_calls", "parse_tool_calls_detailed", "inject_format_remin
 log = logging.getLogger("qwen2api.tool_parser")
 
 
-CASE_SENSITIVE_TOOL_NAMES = {"Bash", "Edit", "Write", "Read", "Grep", "Glob", "WebFetch", "WebSearch"}
+CASE_SENSITIVE_TOOL_NAMES = {"Bash", "Edit", "Write", "Read", "Grep", "Glob", "WebFetch"}
 
 
 def _tool_name(tool: dict[str, Any]) -> str:

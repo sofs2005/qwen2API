@@ -994,16 +994,16 @@ def evaluate_retry_directive(
 
             if (
                 first_tool
-                and first_tool.get("name") == "WebSearch"
                 and has_recent_search_no_results(history_messages)
                 and can_retry_after_output
+                and is_exploration_tool_call(first_tool.get("name", ""), first_tool.get("input", {}))
             ):
                 force_text = (
-                    "[强制要求]: 上次WebSearch没有返回结果。"
-                    "不要用类似的词再次调用WebSearch。"
+                    "[强制要求]: 上次搜索类工具没有返回结果。"
+                    "不要用类似的词再次调用同一个搜索工具。"
                     "使用其他工具或用现有信息完成回答。"
-                    "\n[MANDATORY]: The last WebSearch returned no results. "
-                    "Do NOT call WebSearch again with similar wording. "
+                    "\n[MANDATORY]: The last search tool returned no results. "
+                    "Do NOT call the same search tool again with similar wording. "
                     "Use another tool or finish with the best available answer."
                 )
                 return _retry(
