@@ -3,7 +3,7 @@ from __future__ import annotations
 from backend.adapter.standard_request import StandardRequest, enforce_declared_tool_choice, normalize_tool_choice
 from backend.core.config import resolve_request_model
 from backend.services.client_profiles import infer_client_profile, request_looks_like_coding_task
-from backend.services.prompt_builder import messages_to_prompt
+from backend.toolcore.prompt_builder import messages_to_prompt
 from backend.toolcore.request_normalizer import normalize_chat_request, to_prompt_payload
 from backend.toolcall.normalize import build_tool_name_registry
 

@@ -28,7 +28,7 @@ from backend.services.responses_compat import (
 )
 from backend.services.response_formatters import build_openai_response_payload
 from backend.services.standard_request_builder import build_chat_standard_request
-from backend.services.task_session import (
+from backend.toolcore.task_session import (
     build_openai_assistant_history_message,
     clear_invalidated_session_chat,
     log_session_plan_reuse_cancelled,

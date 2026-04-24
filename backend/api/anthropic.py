@@ -21,12 +21,13 @@ from backend.runtime.execution import (
 from backend.services.auth_quota import resolve_auth_context
 from backend.services.context_attachment_manager import prepare_context_attachments, derive_session_key
 from backend.services.attachment_preprocessor import preprocess_attachments
-from backend.services.prompt_builder import CLAUDE_CODE_OPENAI_PROFILE, messages_to_prompt
+from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE
+from backend.toolcore.prompt_builder import messages_to_prompt
 from backend.services.response_formatters import build_anthropic_message_payload
 from backend.services.qwen_client import QwenClient
 from backend.adapter.standard_request import normalize_tool_choice
 from backend.toolcore.request_normalizer import normalize_anthropic_request, to_prompt_payload
-from backend.services.task_session import (
+from backend.toolcore.task_session import (
     build_anthropic_assistant_history_message,
     build_retry_rebase_prompt,
     clear_invalidated_session_chat,

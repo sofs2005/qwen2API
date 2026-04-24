@@ -15,7 +15,7 @@ from backend.runtime.execution import (
     evaluate_retry_directive,
 )
 from backend.services.auth_quota import add_used_tokens
-from backend.services.task_session import build_retry_rebase_prompt
+from backend.toolcore.task_session import build_retry_rebase_prompt
 from backend.services.token_calc import calculate_usage
 from backend.toolcall.runtime_tools import (
     is_list_directory_tool_name,
