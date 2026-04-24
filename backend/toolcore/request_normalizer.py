@@ -10,6 +10,15 @@ from backend.toolcore.types import (
     ToolCoreRequest,
     ToolDefinition,
 )
+from backend.toolcore.tool_catalog import ToolCatalog
+
+__all__ = [
+    "normalize_chat_request",
+    "normalize_responses_request",
+    "normalize_anthropic_request",
+    "normalize_gemini_request",
+    "to_prompt_payload",
+]
 
 
 def _dict_or_empty(value: Any) -> dict[str, Any]:
@@ -61,10 +70,141 @@ def _normalize_tools(raw_tools: Any) -> list[ToolDefinition]:
                 name=name,
                 description=description,
                 parameters=parameters,
+                client_name=name,
+                model_name=name,
                 raw=raw_tool,
             )
         )
     return tools
+
+
+def _normalize_anthropic_tools(raw_tools: Any) -> list[ToolDefinition]:
+    if raw_tools is None:
+        return []
+    if not isinstance(raw_tools, list):
+        raise ValueError("tools must be a list")
+
+    tools: list[ToolDefinition] = []
+    for raw_tool in raw_tools:
+        if not isinstance(raw_tool, dict):
+            continue
+        name = str(raw_tool.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(raw_tool.get("description") or "")
+        parameters = _dict_or_empty(raw_tool.get("input_schema"))
+        tools.append(
+            ToolDefinition(
+                name=name,
+                description=description,
+                parameters=parameters,
+                client_name=name,
+                model_name=name,
+                raw=raw_tool,
+            )
+        )
+    return tools
+
+
+def _normalize_gemini_messages(contents: Any) -> list[dict[str, Any]]:
+    if contents is None:
+        return []
+    if not isinstance(contents, list):
+        raise ValueError("contents must be a list")
+
+    messages: list[dict[str, Any]] = []
+    for message in contents:
+        if not isinstance(message, dict):
+            continue
+        role = "assistant" if message.get("role") == "model" else "user"
+        text_parts: list[str] = []
+        for part in message.get("parts", []) or []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                text_parts.append(text)
+        if text_parts:
+            messages.append({"role": role, "content": "\n".join(text_parts)})
+    return messages
+
+
+def _normalize_gemini_tools(raw_tools: Any) -> list[ToolDefinition]:
+    if raw_tools is None:
+        return []
+    if not isinstance(raw_tools, list):
+        raise ValueError("tools must be a list")
+
+    tools: list[ToolDefinition] = []
+    for raw_tool in raw_tools:
+        if not isinstance(raw_tool, dict):
+            continue
+        declarations = raw_tool.get("functionDeclarations", [])
+        if not isinstance(declarations, list):
+            continue
+        for declaration in declarations:
+            if not isinstance(declaration, dict):
+                continue
+            name = str(declaration.get("name") or "").strip()
+            if not name:
+                continue
+            description = str(declaration.get("description") or "")
+            parameters = _dict_or_empty(declaration.get("parameters"))
+            tools.append(
+                ToolDefinition(
+                    name=name,
+                    description=description,
+                    parameters=parameters,
+                    client_name=name,
+                    model_name=name,
+                    raw=declaration,
+                )
+            )
+    return tools
+
+
+def _normalize_gemini_tool_choice(body: dict[str, Any]) -> Any:
+    tool_config = body.get("toolConfig")
+    if not isinstance(tool_config, dict):
+        return None
+    function_calling = tool_config.get("functionCallingConfig")
+    if not isinstance(function_calling, dict):
+        return None
+    mode = str(function_calling.get("mode") or "").strip().upper()
+    if mode == "NONE":
+        return "none"
+    if mode == "ANY":
+        return "required"
+    if mode == "AUTO":
+        return "auto"
+    return None
+
+
+def to_prompt_payload(request: ToolCoreRequest, *, model: str, stream: bool = False) -> dict[str, Any]:
+    tools = [
+        {
+            "name": tool.client_name or tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        }
+        for tool in request.tools
+    ]
+
+    tool_choice: Any = request.raw_tool_choice
+    if tool_choice is None and request.tool_choice_policy == ToolChoicePolicy.NONE:
+        tool_choice = "none"
+    elif tool_choice is None and request.tool_choice_policy == ToolChoicePolicy.REQUIRED:
+        tool_choice = "required"
+    elif tool_choice is None and request.tool_choice_policy == ToolChoicePolicy.FORCED and request.forced_tool_name:
+        tool_choice = {"type": "function", "function": {"name": request.forced_tool_name}}
+
+    return {
+        "model": model,
+        "messages": request.messages,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "stream": stream,
+    }
 
 
 def _parse_tool_choice(raw_tool_choice: Any, declared_tool_names: set[str]) -> tuple[ToolChoicePolicy, str | None]:
@@ -97,7 +237,11 @@ def _parse_tool_choice(raw_tool_choice: Any, declared_tool_names: set[str]) -> t
         if not forced_name:
             raise ValueError("Invalid tool_choice: missing forced tool name")
         if declared_tool_names and forced_name not in declared_tool_names:
-            raise ValueError(f"Invalid tool_choice: undeclared tool {forced_name}")
+            lowered_map = {name.lower(): name for name in declared_tool_names}
+            canonical = lowered_map.get(forced_name.lower())
+            if canonical is None:
+                raise ValueError(f"Invalid tool_choice: undeclared tool {forced_name}")
+            forced_name = canonical
         return ToolChoicePolicy.FORCED, forced_name
     raise ValueError(f"Invalid tool_choice: {raw_tool_choice}")
 
@@ -158,6 +302,7 @@ def _normalize_function_call_output(raw_output: Any) -> list[CanonicalToolResult
 def normalize_chat_request(req_data: dict[str, Any]) -> ToolCoreRequest:
     messages = _normalize_messages(req_data.get("messages"))
     tools = _normalize_tools(req_data.get("tools"))
+    tool_catalog = ToolCatalog(tools)
     declared_tool_names = {tool.name for tool in tools}
     raw_tool_choice = req_data.get("tool_choice")
     policy, forced_tool_name = _parse_tool_choice(raw_tool_choice, declared_tool_names)
@@ -176,12 +321,14 @@ def normalize_chat_request(req_data: dict[str, Any]) -> ToolCoreRequest:
         forced_tool_name=forced_tool_name,
         tool_calls=tool_calls,
         raw_tool_choice=raw_tool_choice,
+        tool_catalog=tool_catalog,
     )
 
 
 def normalize_responses_request(req_data: dict[str, Any]) -> ToolCoreRequest:
     messages = _normalize_messages(req_data.get("input", req_data.get("messages")))
     tools = _normalize_tools(req_data.get("tools"))
+    tool_catalog = ToolCatalog(tools)
     declared_tool_names = {tool.name for tool in tools}
     raw_tool_choice = req_data.get("tool_choice")
     if raw_tool_choice is not None and not tools:
@@ -203,4 +350,46 @@ def normalize_responses_request(req_data: dict[str, Any]) -> ToolCoreRequest:
         tool_calls=tool_calls,
         tool_results=tool_results,
         raw_tool_choice=raw_tool_choice,
+        tool_catalog=tool_catalog,
+    )
+
+
+def normalize_anthropic_request(req_data: dict[str, Any]) -> ToolCoreRequest:
+    messages = _normalize_messages(req_data.get("messages"))
+    tools = _normalize_anthropic_tools(req_data.get("tools"))
+    tool_catalog = ToolCatalog(tools)
+    declared_tool_names = {tool.name for tool in tools}
+    raw_tool_choice = req_data.get("tool_choice")
+    policy, forced_tool_name = _parse_tool_choice(raw_tool_choice, declared_tool_names)
+    if raw_tool_choice is not None and not tools:
+        raise ValueError("tool_choice provided but no tools declared")
+
+    return ToolCoreRequest(
+        messages=messages,
+        tools=tools,
+        tool_choice_policy=policy,
+        forced_tool_name=forced_tool_name,
+        raw_tool_choice=raw_tool_choice,
+        tool_catalog=tool_catalog,
+    )
+
+
+def normalize_gemini_request(req_data: dict[str, Any], *, model: str, force_stream: bool | None = None) -> ToolCoreRequest:
+    del model, force_stream
+    messages = _normalize_gemini_messages(req_data.get("contents"))
+    tools = _normalize_gemini_tools(req_data.get("tools"))
+    tool_catalog = ToolCatalog(tools)
+    declared_tool_names = {tool.name for tool in tools}
+    raw_tool_choice = _normalize_gemini_tool_choice(req_data)
+    if raw_tool_choice is not None and not tools:
+        raise ValueError("tool_choice provided but no tools declared")
+    policy, forced_tool_name = _parse_tool_choice(raw_tool_choice, declared_tool_names)
+
+    return ToolCoreRequest(
+        messages=messages,
+        tools=tools,
+        tool_choice_policy=policy,
+        forced_tool_name=forced_tool_name,
+        raw_tool_choice=raw_tool_choice,
+        tool_catalog=tool_catalog,
     )

@@ -4,17 +4,20 @@ from backend.adapter.standard_request import StandardRequest, enforce_declared_t
 from backend.core.config import resolve_request_model
 from backend.services.client_profiles import infer_client_profile, request_looks_like_coding_task
 from backend.services.prompt_builder import messages_to_prompt
+from backend.toolcore.request_normalizer import normalize_chat_request, to_prompt_payload
 from backend.toolcall.normalize import build_tool_name_registry
 
 
 def build_chat_standard_request(req_data: dict, *, default_model: str, surface: str, client_profile: str = "openclaw_openai") -> StandardRequest:
     requested_model = req_data.get("model", default_model)
     effective_client_profile = infer_client_profile(req_data, fallback_profile=client_profile)
-    prompt_result = messages_to_prompt(req_data, client_profile=effective_client_profile)
+    normalized_request = normalize_chat_request(req_data)
+    normalized_payload = to_prompt_payload(normalized_request, model=requested_model, stream=bool(req_data.get("stream", False)))
+    prompt_result = messages_to_prompt(normalized_payload, client_profile=effective_client_profile)
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]
     coding_intent = request_looks_like_coding_task(req_data, client_profile=effective_client_profile)
-    tool_choice = normalize_tool_choice(req_data.get("tool_choice"))
+    tool_choice = normalize_tool_choice(normalized_request.raw_tool_choice)
     tool_choice = enforce_declared_tool_choice(tool_choice, tool_names)
     return StandardRequest(
         prompt=prompt_result.prompt,

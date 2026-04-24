@@ -1,6 +1,11 @@
 import unittest
 
-from backend.toolcore.request_normalizer import normalize_chat_request, normalize_responses_request
+from backend.toolcore.request_normalizer import (
+    normalize_anthropic_request,
+    normalize_chat_request,
+    normalize_gemini_request,
+    normalize_responses_request,
+)
 from backend.toolcore.types import ToolChoicePolicy, ToolCoreRequest
 
 
@@ -154,6 +159,58 @@ class ResponsesRequestNormalizationTests(unittest.TestCase):
                     "tool_choice": "invalid",
                 }
             )
+
+
+class CrossSurfaceNormalizationTests(unittest.TestCase):
+    def test_anthropic_request_normalizes_to_same_toolcore_shape(self) -> None:
+        result = normalize_anthropic_request(
+            {
+                "model": "claude-3-5-sonnet",
+                "messages": [{"role": "user", "content": "read the file"}],
+                "tools": [{"name": "Read", "description": "Read file", "input_schema": {"type": "object"}}],
+                "tool_choice": {"type": "function", "function": {"name": "Read"}},
+            }
+        )
+
+        self.assertEqual([tool.name for tool in result.tools], ["Read"])
+        self.assertEqual(result.tool_choice_policy, ToolChoicePolicy.FORCED)
+        self.assertEqual(result.forced_tool_name, "Read")
+
+    def test_gemini_request_normalizes_to_same_toolcore_shape(self) -> None:
+        result = normalize_gemini_request(
+            {
+                "contents": [{"role": "user", "parts": [{"text": "read the file"}]}],
+                "tools": [{"functionDeclarations": [{"name": "Read", "description": "Read file", "parameters": {"type": "object"}}]}],
+                "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
+            },
+            model="gemini-2.5-pro",
+            force_stream=False,
+        )
+
+        self.assertEqual(result.messages, [{"role": "user", "content": "read the file"}])
+        self.assertEqual([tool.name for tool in result.tools], ["Read"])
+        self.assertEqual(result.tool_choice_policy, ToolChoicePolicy.REQUIRED)
+
+    def test_equivalent_requests_across_surfaces_produce_equivalent_core_fields(self) -> None:
+        openai_chat = normalize_chat_request(
+            {
+                "messages": [{"role": "user", "content": "read the file"}],
+                "tools": [{"type": "function", "function": {"name": "Read", "description": "Read file", "parameters": {"type": "object"}}}],
+                "tool_choice": {"type": "function", "function": {"name": "Read"}},
+            }
+        )
+        anthropic = normalize_anthropic_request(
+            {
+                "messages": [{"role": "user", "content": "read the file"}],
+                "tools": [{"name": "Read", "description": "Read file", "input_schema": {"type": "object"}}],
+                "tool_choice": {"type": "function", "function": {"name": "Read"}},
+            }
+        )
+
+        self.assertEqual(openai_chat.messages, anthropic.messages)
+        self.assertEqual([tool.name for tool in openai_chat.tools], [tool.name for tool in anthropic.tools])
+        self.assertEqual(openai_chat.tool_choice_policy, anthropic.tool_choice_policy)
+        self.assertEqual(openai_chat.forced_tool_name, anthropic.forced_tool_name)
 
 
 if __name__ == "__main__":
