@@ -1,0 +1,73 @@
+import unittest
+
+from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE
+from backend.toolcore.prompt_builder import _extract_text, _extract_user_text_only, messages_to_prompt
+
+
+class ToolCorePromptBuilderTests(unittest.TestCase):
+    def test_extract_user_text_only_joins_text_blocks(self) -> None:
+        content = [
+            {"type": "text", "text": "first"},
+            {"type": "tool_result", "content": "ignored"},
+            {"type": "text", "text": "second"},
+        ]
+
+        self.assertEqual(_extract_user_text_only(content, client_profile=OPENCLAW_OPENAI_PROFILE), "first\nsecond")
+
+    def test_extract_text_renders_tool_and_attachment_blocks(self) -> None:
+        content = [
+            {"type": "text", "text": "look here"},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}},
+            {"type": "tool_result", "tool_use_id": "call_1", "content": [{"type": "text", "text": "done"}]},
+            {"type": "input_file", "file_id": "file_1", "filename": "spec.md"},
+            {"type": "input_image", "file_id": "img_1", "mime_type": "image/png"},
+        ]
+
+        rendered = _extract_text(content, client_profile=CLAUDE_CODE_OPENAI_PROFILE)
+
+        self.assertIn("look here", rendered)
+        self.assertIn('##TOOL_CALL##\n{"name": "Read", "input": {"file_path": "README.md"}}\n##END_CALL##', rendered)
+        self.assertIn("[Tool Result for call call_1]\ndone\n[/Tool Result]", rendered)
+        self.assertIn("[Attachment file_id=file_1 filename=spec.md]", rendered)
+        self.assertIn("[Attachment image file_id=img_1 mime=image/png]", rendered)
+
+    def test_extract_text_user_tool_mode_keeps_latest_text_block(self) -> None:
+        content = [
+            {"type": "text", "text": "old instruction"},
+            {"type": "text", "text": "latest instruction"},
+        ]
+
+        self.assertEqual(
+            _extract_text(content, user_tool_mode=True, client_profile=CLAUDE_CODE_OPENAI_PROFILE),
+            "latest instruction",
+        )
+
+    def test_messages_to_prompt_preserves_required_tool_and_current_task(self) -> None:
+        req_data = {
+            "system": "You are helpful",
+            "messages": [
+                {"role": "user", "content": "Read the spec and answer"},
+                {"role": "assistant", "content": "Working on it"},
+                {"role": "user", "content": "Now inspect README.md"},
+            ],
+            "tools": [
+                {
+                    "name": "Read",
+                    "description": "Read file content",
+                    "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}},
+                }
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "Read"}},
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertTrue(result.tool_enabled)
+        self.assertEqual(result.tools[0]["name"], "Read")
+        self.assertIn('MUST call the exact tool "Read"', result.prompt)
+        self.assertIn("Human (CURRENT TASK - TOP PRIORITY): Now inspect README.md", result.prompt)
+        self.assertTrue(result.prompt.endswith("Assistant:"))
+
+
+if __name__ == "__main__":
+    unittest.main()
