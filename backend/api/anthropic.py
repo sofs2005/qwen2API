@@ -149,6 +149,7 @@ def _build_standard_request(req_data: dict) -> StandardRequest:
         tools=tools,
         tool_names=tool_names,
         tool_name_registry=build_tool_name_registry(tool_names),
+        tool_catalog=normalized_request.tool_catalog,
         tool_enabled=prompt_result.tool_enabled,
         tool_choice_mode=tool_choice.mode,
         required_tool_name=tool_choice.required_tool_name,

@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.runtime.attachment_types import NormalizedAttachment
-from backend.toolcall.normalize import normalize_tool_name
 from backend.services.client_profiles import (
     CLAUDE_CODE_OPENAI_PROFILE,
     OPENCLAW_OPENAI_PROFILE,
@@ -57,7 +56,10 @@ def normalize_tool_choice(tool_choice: Any) -> ToolChoiceSpec:
 def enforce_declared_tool_choice(tool_choice: ToolChoiceSpec, allowed_tool_names: list[str]) -> ToolChoiceSpec:
     if not tool_choice.required_tool_name:
         return tool_choice
-    normalized_name = normalize_tool_name(tool_choice.required_tool_name, allowed_tool_names)
+    normalized_name = tool_choice.required_tool_name
+    if allowed_tool_names and normalized_name not in allowed_tool_names:
+        lowered_map = {str(name).lower(): name for name in allowed_tool_names}
+        normalized_name = lowered_map.get(str(tool_choice.required_tool_name).lower(), normalized_name)
     if allowed_tool_names and normalized_name not in allowed_tool_names:
         raise ValueError(f"tool_choice references undeclared tool {tool_choice.required_tool_name}")
     tool_choice.required_tool_name = normalized_name
@@ -77,6 +79,7 @@ class StandardRequest:
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
     tool_name_registry: dict[str, str] = field(default_factory=dict)
+    tool_catalog: Any | None = None
     tool_enabled: bool = False
     tool_choice_mode: str = "auto"
     required_tool_name: str | None = None
