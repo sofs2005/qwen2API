@@ -13,6 +13,7 @@ from backend.core.request_logging import update_request_context
 from backend.runtime.stream_metrics import StreamMetrics
 from backend.services import tool_parser
 from backend.toolcore.directive_parser import parse_state_tool_calls, parse_textual_tool_calls
+from backend.toolcore.policy import evaluate_tool_policy, recent_same_tool_identity_count_in_turn
 from backend.toolcore.stream_sieve import ToolStreamSieve
 from backend.toolcall.normalize import normalize_tool_name
 from backend.toolcall.runtime_tools import (
@@ -303,28 +304,7 @@ def tool_identity(tool_name: str, tool_input: Any = None) -> str:
 
 
 def recent_same_tool_identity_count(messages: list[dict[str, Any]] | None, tool_name: str, tool_input: Any = None) -> int:
-    target = tool_identity(tool_name, tool_input)
-    count = 0
-    started = False
-    for msg in reversed(messages or []):
-        role = msg.get("role")
-        if role == "user":
-            break
-        if role != "assistant":
-            if started and role == "assistant":
-                break
-            continue
-        tools = _assistant_tool_uses(msg)
-        if not tools:
-            if started:
-                break
-            continue
-        started = True
-        if len(tools) == 1 and tool_identity(tools[0][0], tools[0][1]) == target:
-            count += 1
-            continue
-        break
-    return count
+    return recent_same_tool_identity_count_in_turn(messages, tool_name, tool_input)
 
 
 def has_recent_openai_same_tool_call(history_messages: list[dict[str, Any]] | None, tool_name: str, tool_input: Any = None) -> bool:
@@ -815,12 +795,18 @@ def evaluate_retry_directive(
         )
         return RuntimeRetryDirective(retry=True, next_prompt=next_prompt, reason=reason)
 
-    if state.blocked_tool_names and request.tools:
+    policy_decision = evaluate_tool_policy(
+        request=request,
+        state=state,
+        history_messages=history_messages,
+        can_retry_after_output=can_retry_after_output,
+    )
+    if policy_decision.kind == "retry" and state.blocked_tool_names and request.tools:
         if not can_retry_after_output:
             return RuntimeRetryDirective(retry=False, next_prompt=current_prompt, reason=None)
         blocked_name = normalize_tool_name(state.blocked_tool_names[0], request.tool_names)
         return _retry(
-            f"blocked_tool_name:{blocked_name}",
+            policy_decision.reason or f"blocked_tool_name:{blocked_name}",
             tool_parser.inject_format_reminder_for_allowed_tools(
                 current_prompt,
                 blocked_name,
