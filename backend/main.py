@@ -19,7 +19,7 @@ from backend.core.session_lock import SessionLockRegistry
 from backend.core.request_logging import configure_logging, request_context
 from backend.services.qwen_client import QwenClient
 from backend.services.file_store import LocalFileStore
-from backend.services.context_offload import ContextOffloader
+from backend.toolcore.context_offload import ContextOffloader
 from backend.services.response_store import InMemoryResponseStore
 from backend.services.upstream_file_uploader import UpstreamFileUploader
 import backend.api.models as models

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.upstream_file_cache import UpstreamFileCacheEntry
-from backend.services.context_offload import SYSTEM_CONTEXT_FILE_PREFIX, SYSTEM_CONTEXT_PROMPT_NOTE
+from backend.toolcore.context_offload import SYSTEM_CONTEXT_FILE_PREFIX, SYSTEM_CONTEXT_PROMPT_NOTE
 
 
 log = logging.getLogger("qwen2api.context_attachment_manager")
