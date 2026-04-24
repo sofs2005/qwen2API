@@ -15,7 +15,6 @@ from backend.services import tool_parser
 from backend.toolcore.directive_parser import parse_state_tool_calls, parse_textual_tool_calls
 from backend.toolcore.policy import evaluate_tool_policy, recent_same_tool_identity_count_in_turn
 from backend.toolcore.stream_sieve import ToolStreamSieve
-from backend.toolcall.normalize import normalize_tool_name
 from backend.toolcall.runtime_tools import (
     is_list_directory_tool_name,
     is_read_tool_name,
@@ -168,18 +167,17 @@ def extract_blocked_tool_names(text: str, allowed_tool_names: list[str] | None =
     blocked = re.findall(r"Tool\s+([A-Za-z0-9_.:-]+)\s+does not exists?\.?", text)
     if not blocked:
         return []
-    if not allowed_tool_names:
-        return blocked
-    return [normalize_tool_name(name, allowed_tool_names) for name in blocked]
+    return blocked
 
 
 def normalize_streamed_tool_calls(tool_calls: list[dict[str, Any]], allowed_tool_names: list[str] | None = None) -> list[dict[str, Any]]:
+    del allowed_tool_names
     normalized_calls: list[dict[str, Any]] = []
     for tool_call in tool_calls or []:
         if not isinstance(tool_call, dict):
             continue
         updated = dict(tool_call)
-        updated["name"] = normalize_tool_name(str(tool_call.get("name", "")), allowed_tool_names or [])
+        updated["name"] = str(tool_call.get("name", ""))
         normalized_calls.append(updated)
     return normalized_calls
 
@@ -667,15 +665,17 @@ def parse_tool_directive_once(request: StandardRequest, state: RuntimeAttemptSta
             return RuntimeToolDirective(tool_blocks=parsed.tool_blocks, stop_reason=parsed.stop_reason)
     else:
         if state.tool_calls:
+            allowed_names = {str(name).strip() for name in request.tool_names if str(name).strip()}
             return RuntimeToolDirective(
                 tool_blocks=[
                     {
                         "type": "tool_use",
                         "id": tool_call["id"],
-                        "name": normalize_tool_name(tool_call["name"], request.tool_names),
+                        "name": str(tool_call["name"]),
                         "input": tool_call.get("input", {}),
                     }
                     for tool_call in state.tool_calls
+                    if str(tool_call.get("name", "")).strip() in allowed_names
                 ],
                 stop_reason="tool_use",
             )
@@ -804,7 +804,7 @@ def evaluate_retry_directive(
     if policy_decision.kind == "retry" and state.blocked_tool_names and request.tools:
         if not can_retry_after_output:
             return RuntimeRetryDirective(retry=False, next_prompt=current_prompt, reason=None)
-        blocked_name = normalize_tool_name(state.blocked_tool_names[0], request.tool_names)
+        blocked_name = state.blocked_tool_names[0]
         return _retry(
             policy_decision.reason or f"blocked_tool_name:{blocked_name}",
             tool_parser.inject_format_reminder_for_allowed_tools(

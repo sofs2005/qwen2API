@@ -5,15 +5,15 @@ from backend.adapter.standard_request import StandardRequest
 
 
 class ExecAliasRecoveryTests(unittest.TestCase):
-    def test_native_tool_call_alias_is_normalized_before_streaming(self) -> None:
+    def test_native_tool_call_alias_is_not_rewritten_at_runtime(self) -> None:
         normalized = normalize_streamed_tool_calls(
             [{"id": "call_1", "name": "exec", "input": {"command": "echo hi"}}],
             ["Bash"],
         )
 
-        self.assertEqual(normalized[0]["name"], "Bash")
+        self.assertEqual(normalized[0]["name"], "exec")
 
-    def test_blocked_exec_name_rewrites_prompt_toward_real_shell_tool(self) -> None:
+    def test_blocked_exec_name_is_not_rewritten_to_declared_tool_name(self) -> None:
         request = StandardRequest(
             prompt="Human: do task\n\nAssistant:",
             response_model="gpt-4.1",
@@ -41,8 +41,9 @@ class ExecAliasRecoveryTests(unittest.TestCase):
         )
 
         self.assertTrue(retry.retry)
+        self.assertEqual(retry.reason, "blocked_tool_name:exec")
         self.assertIn("Bash", retry.next_prompt)
-        self.assertNotIn("'exec'", retry.next_prompt)
+        self.assertNotIn("Tool Bash does not exists.", retry.next_prompt)
 
 
 if __name__ == "__main__":

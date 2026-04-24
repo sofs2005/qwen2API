@@ -7,7 +7,6 @@ from typing import Any, cast
 from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE
 from backend.core.request_logging import get_request_context
 from backend.toolcall.formats_json import load_json_with_repair
-from backend.toolcall.normalize import build_tool_name_registry, normalize_tool_name
 from backend.toolcall.parser import parse_tool_calls_detailed
 from backend.toolcore.directive_parser import parse_textual_tool_calls
 
@@ -119,10 +118,10 @@ def _find_tool_use_json(text: str, tool_names: set[str]):
                     try:
                         obj = json.loads(candidate)
                         if isinstance(obj, dict) and obj.get("type") == "tool_use" and obj.get("name"):
-                            normalized_name = normalize_tool_name(obj.get("name", ""), tool_names)
-                            if normalized_name in tool_names:
+                            raw_name = str(obj.get("name", "")).strip()
+                            if raw_name in tool_names:
                                 obj = dict(obj)
-                                obj["name"] = normalized_name
+                                obj["name"] = raw_name
                                 return pos, obj
 
                     except (json.JSONDecodeError, ValueError):
@@ -424,16 +423,15 @@ def _parse_tool_calls_via_toolcore(answer: str, tools: list, *, emit_logs: bool)
             coerced_blocks.append(block)
             continue
         name = str(block.get("name") or "")
-        normalized_name = normalize_tool_name(name, tool_names)
-        if normalized_name not in tool_names:
+        if name not in tool_names:
             coerced_blocks.append({"type": "text", "text": answer})
             return coerced_blocks, "end_turn"
         coerced_blocks.append(
             {
                 "type": "tool_use",
                 "id": block.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
-                "name": normalized_name,
-                "input": _coerce_tool_input(normalized_name, block.get("input", {}), tools),
+                "name": name,
+                "input": _coerce_tool_input(name, block.get("input", {}), tools),
             }
         )
     return coerced_blocks, result.stop_reason
@@ -446,8 +444,6 @@ def _parse_tool_calls(answer: str, tools: list, *, emit_logs: bool):
     if not tools:
         return [{"type": "text", "text": answer}], "end_turn"
     tool_names = {_tool_name(t) for t in tools if _tool_name(t)}
-    tool_registry = build_tool_name_registry(tool_names)
-
     def _log_debug(message: str) -> None:
         if emit_logs:
             log.debug(message)
@@ -464,10 +460,9 @@ def _parse_tool_calls(answer: str, tools: list, *, emit_logs: bool):
     log.info(f"[ToolParse] [{req_tag}] 原始回复({len(answer)}字): {answer[:500]!r}")
 
     def _build_tool_use_block(name, input_data):
-        normalized_name = normalize_tool_name(name, tool_registry.values())
-        cased_name = _normalize_tool_name_case(normalized_name, tool_names)
+        cased_name = _normalize_tool_name_case(str(name or ""), tool_names)
         if cased_name not in tool_names:
-            _log_warning(f"[ToolParse] 工具名不匹配: name={name!r}, normalized={normalized_name!r}, cased={cased_name!r}, tools={tool_names}")
+            _log_warning(f"[ToolParse] 工具名不匹配: name={name!r}, cased={cased_name!r}, tools={tool_names}")
             return None
         coerced_input = _coerce_tool_input(cased_name, input_data, tools)
         tool_id = f"toolu_{uuid.uuid4().hex[:8]}"
@@ -792,38 +787,18 @@ class ToolSieve:
 def inject_format_reminder(prompt: str, tool_name: str, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
     """Inject a format correction reminder into the prompt before the final 'Assistant:' tag.
     Used when Qwen server returns 'Tool X does not exists.' (native call was intercepted)."""
-    if client_profile == CLAUDE_CODE_OPENAI_PROFILE:
-        reminder = (
-            f"[严重错误/CRITICAL ERROR]: 你的输出中出现了 'Tool {tool_name} does not exists.' 这说明你试图描述工具调用而不是真正调用它。\n"
-            f"The text 'Tool {tool_name} does not exists.' appeared in your output. "
-            f"This means you tried to describe a tool call instead of actually calling it.\n\n"
-            f"要调用 {tool_name}，只输出这个精确的JSON格式，不要有其他文本：\n"
-            f"To call {tool_name}, output ONLY this exact JSON format with NO other text:\n"
-            f'{{"name": "{tool_name}", "input": {{"arg1": "value1", "arg2": "value2"}}}}\n\n'
-            f"规则/RULES:\n"
-            f"- 只输出JSON对象，不要有其他内容 / Output ONLY the JSON object, nothing else\n"
-            f"- 前后不要有解释性文字 / NO explanatory text before or after\n"
-            f"- 不要用markdown代码块 / NO markdown code blocks\n"
-            f"- 不要用XML标签如<tool_call> / NO XML tags like <tool_call>\n"
-            f"- 不要用##TOOL_CALL##标记 / NO ##TOOL_CALL## markers\n"
-            f"- 只要纯JSON对象 / Just the raw JSON object\n\n"
-            f"Read工具示例 / Example for Read tool:\n"
-            f'{{"name": "Read", "input": {{"file_path": "/path/to/file"}}}}\n'
-        )
-    else:
-        reminder = (
-            f"[纠正/CORRECTION]: 你用错误的格式调用了 '{tool_name}' — "
-            f"服务器用 'Tool {tool_name} does not exists.' 阻止了它。\n"
-            f"You called '{tool_name}' using the WRONG format — "
-            f"the server BLOCKED it with 'Tool {tool_name} does not exists.'. "
-            f"你必须使用##TOOL_CALL##格式，不能用其他格式：\n"
-            f"You MUST use ##TOOL_CALL## format and NOTHING ELSE:\n"
-            f"##TOOL_CALL##\n"
-            f'{{"name": {json.dumps(tool_name)}, "input": {{...your args here...}}}}\n'
-            f"##END_CALL##\n"
-            f"不要用没有分隔符的JSON。不要用任何XML标签。只能用##TOOL_CALL##。\n"
-            f"DO NOT use JSON without delimiters. DO NOT use any XML tags. ONLY ##TOOL_CALL##.\n"
-        )
+    del client_profile
+    reminder = (
+        f"[纠正/CORRECTION]: 你用错误的格式调用了 '{tool_name}'。\n"
+        f"You called '{tool_name}' using the wrong tool-call format.\n"
+        f"你必须使用唯一允许的 ##TOOL_CALL## / ##END_CALL## 协议：\n"
+        f"You MUST use the only accepted ##TOOL_CALL## / ##END_CALL## protocol:\n"
+        f"##TOOL_CALL##\n"
+        f'{{"name": {json.dumps(tool_name)}, "input": {{...your args here...}}}}\n'
+        f"##END_CALL##\n"
+        f"不要输出纯 JSON，不要输出 XML，不要输出其它包装。\n"
+        f"Do NOT output raw JSON, XML, or any alternate wrapper.\n"
+    )
     prompt = prompt.rstrip()
     if prompt.endswith("Assistant:"):
         return prompt[: -len("Assistant:")] + reminder + "\nAssistant:"
@@ -837,5 +812,23 @@ def inject_format_reminder_for_allowed_tools(
     *,
     client_profile: str = OPENCLAW_OPENAI_PROFILE,
 ) -> str:
-    normalized_tool_name = normalize_tool_name(tool_name, allowed_tool_names or [])
-    return inject_format_reminder(prompt, normalized_tool_name, client_profile=client_profile)
+    declared_tool_name = tool_name
+    if allowed_tool_names:
+        allowed_set = {str(name).strip() for name in allowed_tool_names if str(name).strip()}
+        if declared_tool_name not in allowed_set:
+            declared_tool_name = next(iter(allowed_set), declared_tool_name)
+    if declared_tool_name != tool_name:
+        reminder = (
+            f"[纠正/CORRECTION]: 你刚才输出了未声明的工具名 '{tool_name}'。"
+            f"本轮只能使用请求里声明的工具名，下一次请改用 '{declared_tool_name}'。\n"
+            f"You just emitted an undeclared tool name '{tool_name}'. "
+            f"This turn must use only request-declared tool names. Use '{declared_tool_name}' on the next attempt.\n"
+            f"##TOOL_CALL##\n"
+            f'{{"name": {json.dumps(declared_tool_name)}, "input": {{...your args here...}}}}\n'
+            f"##END_CALL##\n"
+        )
+        prompt = prompt.rstrip()
+        if prompt.endswith("Assistant:"):
+            return prompt[: -len("Assistant:")] + reminder + "\nAssistant:"
+        return prompt + "\n\n" + reminder + "\nAssistant:"
+    return inject_format_reminder(prompt, declared_tool_name, client_profile=client_profile)
