@@ -246,7 +246,7 @@ def _parse_tool_choice(raw_tool_choice: Any, declared_tool_names: set[str]) -> t
     raise ValueError(f"Invalid tool_choice: {raw_tool_choice}")
 
 
-def _canonical_tool_call_from_assistant_message(message: dict[str, Any]) -> list[CanonicalToolCall]:
+def _canonical_tool_call_from_assistant_message(message: dict[str, Any], declared_tool_names: set[str]) -> list[CanonicalToolCall]:
     tool_calls = message.get("tool_calls")
     if not isinstance(tool_calls, list):
         return []
@@ -268,10 +268,13 @@ def _canonical_tool_call_from_assistant_message(message: dict[str, Any]) -> list
             parsed_input = {}
         if not isinstance(parsed_input, dict):
             parsed_input = {"value": parsed_input}
+        name = str(function_payload.get("name") or call.get("name") or "").strip()
+        if declared_tool_names and name not in declared_tool_names:
+            continue
         canonical_calls.append(
             CanonicalToolCall(
                 call_id=str(call.get("id") or call.get("call_id") or "").strip(),
-                name=str(function_payload.get("name") or call.get("name") or "").strip(),
+                name=name,
                 input=parsed_input,
             )
         )
@@ -312,7 +315,7 @@ def normalize_chat_request(req_data: dict[str, Any]) -> ToolCoreRequest:
     tool_calls: list[CanonicalToolCall] = []
     for message in messages:
         if str(message.get("role") or "").strip().lower() == "assistant":
-            tool_calls.extend(_canonical_tool_call_from_assistant_message(message))
+            tool_calls.extend(_canonical_tool_call_from_assistant_message(message, declared_tool_names))
 
     return ToolCoreRequest(
         messages=messages,
@@ -338,7 +341,7 @@ def normalize_responses_request(req_data: dict[str, Any]) -> ToolCoreRequest:
     tool_calls: list[CanonicalToolCall] = []
     for message in messages:
         if str(message.get("role") or "").strip().lower() == "assistant":
-            tool_calls.extend(_canonical_tool_call_from_assistant_message(message))
+            tool_calls.extend(_canonical_tool_call_from_assistant_message(message, declared_tool_names))
 
     tool_results = _normalize_function_call_output(req_data.get("function_call_output"))
 
