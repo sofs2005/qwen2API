@@ -25,6 +25,7 @@ from backend.services.prompt_builder import CLAUDE_CODE_OPENAI_PROFILE, messages
 from backend.services.response_formatters import build_anthropic_message_payload
 from backend.services.qwen_client import QwenClient
 from backend.adapter.standard_request import normalize_tool_choice
+from backend.toolcore.request_normalizer import normalize_anthropic_request, to_prompt_payload
 from backend.services.task_session import (
     build_anthropic_assistant_history_message,
     build_retry_rebase_prompt,
@@ -129,11 +130,13 @@ class _AnthropicStreamState:
 
 def _build_standard_request(req_data: dict) -> StandardRequest:
     model_name = req_data.get("model", "claude-3-5-sonnet")
-    prompt_result = messages_to_prompt(req_data, client_profile=CLAUDE_CODE_OPENAI_PROFILE)
+    normalized_request = normalize_anthropic_request(req_data)
+    normalized_payload = to_prompt_payload(normalized_request, model=model_name, stream=bool(req_data.get("stream", False)))
+    prompt_result = messages_to_prompt(normalized_payload, client_profile=CLAUDE_CODE_OPENAI_PROFILE)
     prompt = prompt_result.prompt
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]
-    tool_choice = normalize_tool_choice(req_data.get("tool_choice"))
+    tool_choice = normalize_tool_choice(normalized_request.raw_tool_choice)
     tool_choice = enforce_declared_tool_choice(tool_choice, tool_names)
     return StandardRequest(
         prompt=prompt,
