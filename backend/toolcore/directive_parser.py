@@ -5,9 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.toolcall.formats_json import load_json_with_repair
-from backend.toolcall.normalize import normalize_arguments, normalize_tool_name
+from backend.toolcall.normalize import normalize_arguments
 from backend.toolcall.parser import parse_tool_calls_detailed
-from backend.toolcall.normalize import normalize_tool_name
 from backend.toolcore.types import CanonicalToolCall
 
 
@@ -21,8 +20,11 @@ class ToolDirectiveParseResult:
 def parse_state_tool_calls(state_tool_calls: list[dict[str, Any]], allowed_tool_names: list[str]) -> ToolDirectiveParseResult:
     canonical_calls: list[CanonicalToolCall] = []
     tool_blocks: list[dict[str, Any]] = []
+    allowed_name_set = {str(name).strip() for name in allowed_tool_names if str(name).strip()}
     for tool_call in state_tool_calls:
-        name = normalize_tool_name(str(tool_call.get("name", "")), allowed_tool_names)
+        name = str(tool_call.get("name", "")).strip()
+        if allowed_name_set and name not in allowed_name_set:
+            continue
         if not name:
             continue
         call_id = str(tool_call.get("id") or tool_call.get("call_id") or "").strip()
@@ -54,14 +56,13 @@ def parse_textual_tool_calls(answer_text: str, tools: list[dict[str, Any]]) -> T
                 obj = load_json_with_repair(match.group(1))
                 if isinstance(obj, dict) and obj.get("name"):
                     raw_name = str(obj.get("name", ""))
-                    normalized_name = normalize_tool_name(raw_name, tool_names)
                     raw_input = obj.get("input", obj.get("args", obj.get("arguments", obj.get("parameters", {}))))
-                    if normalized_name in tool_names:
+                    if raw_name in tool_names:
                         tool_blocks.append(
                             {
                                 "type": "tool_use",
                                 "id": f"toolu_{len(tool_blocks)}",
-                                "name": normalized_name,
+                                "name": raw_name,
                                 "input": normalize_arguments(raw_input),
                             }
                         )

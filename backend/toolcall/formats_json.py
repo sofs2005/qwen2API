@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from .normalize import normalize_arguments, normalize_tool_name
+from .normalize import normalize_arguments
 
 
 JSON_INPUT_KEYS = ("input", "arguments", "args", "parameters")
@@ -69,8 +69,11 @@ def _extract_call(payload: object, allowed_names: set[str]) -> dict[str, Any] | 
                 break
         else:
             raw_input = {}
+    if not isinstance(name, str) or name not in allowed_names:
+        return None
+
     return {
-        "name": name if isinstance(name, str) and name in allowed_names else normalize_tool_name(name, allowed_names),
+        "name": name,
         "input": normalize_arguments(raw_input),
     }
 

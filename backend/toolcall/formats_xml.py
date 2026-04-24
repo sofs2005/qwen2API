@@ -4,9 +4,6 @@ import json
 import re
 from xml.etree import ElementTree
 
-from .normalize import normalize_tool_name
-
-
 def parse_xml_format(text: str, allowed_names: set[str]) -> list[dict[str, object]]:
     stripped = text.strip()
 
@@ -17,6 +14,9 @@ def parse_xml_format(text: str, allowed_names: set[str]) -> list[dict[str, objec
         except (json.JSONDecodeError, TypeError, ValueError):
             payload = None
         if isinstance(payload, dict) and payload.get("name"):
+            raw_name = str(payload.get("name", ""))
+            if raw_name not in allowed_names:
+                return []
             raw_input = payload.get("input", payload.get("arguments", payload.get("args", payload.get("parameters", {}))))
             if isinstance(raw_input, str):
                 try:
@@ -24,7 +24,7 @@ def parse_xml_format(text: str, allowed_names: set[str]) -> list[dict[str, objec
                 except (json.JSONDecodeError, TypeError, ValueError):
                     raw_input = {"value": raw_input}
             return [{
-                "name": normalize_tool_name(str(payload.get("name", "")), allowed_names),
+                "name": raw_name,
                 "input": raw_input if isinstance(raw_input, dict) else {},
             }]
 
@@ -42,6 +42,8 @@ def parse_xml_format(text: str, allowed_names: set[str]) -> list[dict[str, objec
     name = root.attrib.get("name")
     if not name:
         return []
+    if name not in allowed_names:
+        return []
 
     arguments: dict[str, str] = {}
     for child in root.findall("parameter"):
@@ -51,6 +53,6 @@ def parse_xml_format(text: str, allowed_names: set[str]) -> list[dict[str, objec
         arguments[param_name] = "".join(child.itertext()).strip()
 
     return [{
-        "name": normalize_tool_name(name, allowed_names),
+        "name": name,
         "input": arguments,
     }]

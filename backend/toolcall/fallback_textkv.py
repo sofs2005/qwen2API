@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .normalize import normalize_arguments, normalize_tool_name
+from .normalize import normalize_arguments
 
 
 def parse_textkv_format(text: str, allowed_names: set[str]) -> list[dict[str, object]]:
@@ -21,8 +21,10 @@ def parse_textkv_format(text: str, allowed_names: set[str]) -> list[dict[str, ob
 
     if not name:
         return []
+    if name not in allowed_names:
+        return []
 
     return [{
-        "name": normalize_tool_name(name, allowed_names),
+        "name": name,
         "input": normalize_arguments(arguments),
     }]
