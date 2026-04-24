@@ -11,6 +11,7 @@ from backend.services.completion_bridge import run_retryable_completion_bridge
 from backend.services.auth_quota import resolve_auth_context
 from backend.services.response_formatters import build_gemini_generate_payload
 from backend.services.standard_request_builder import build_chat_standard_request
+from backend.toolcore.request_normalizer import normalize_gemini_request, to_prompt_payload
 
 log = logging.getLogger("qwen2api.gemini")
 router = APIRouter()
@@ -78,7 +79,8 @@ def _is_gemini_stream_request(body: dict[str, Any]) -> bool:
 
 
 def _build_standard_request(model: str, body: dict, *, stream: bool | None = None):
-    payload = _gemini_to_chat_payload(model, body, force_stream=stream)
+    normalized_request = normalize_gemini_request(body, model=model, force_stream=stream)
+    payload = to_prompt_payload(normalized_request, model=model, stream=_is_gemini_stream_request(body) if stream is None else stream)
     return build_chat_standard_request(payload, default_model=model, surface="gemini", client_profile="openclaw_openai")
 
 
