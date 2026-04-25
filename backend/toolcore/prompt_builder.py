@@ -9,7 +9,7 @@ from backend.services.client_profiles import (
     CLAUDE_CODE_OPENAI_PROFILE,
     OPENCLAW_OPENAI_PROFILE,
     QWEN_CODE_OPENAI_PROFILE,
-    sanitize_openclaw_prompt_text,
+    sanitize_runtime_prompt_text,
     looks_like_opencode_system_prompt,
     sanitize_openclaw_user_text,
 )
@@ -31,10 +31,10 @@ class PromptBuildResult:
 
 
 def _sanitize_prompt_content(content, *, role: str, client_profile: str):
-    if client_profile != OPENCLAW_OPENAI_PROFILE:
-        return content
     if isinstance(content, str):
-        return sanitize_openclaw_prompt_text(content, role)
+        if role == "system":
+            return sanitize_runtime_prompt_text(content, role)
+        return sanitize_openclaw_user_text(content) if client_profile == OPENCLAW_OPENAI_PROFILE and role == "user" else content
     if isinstance(content, list):
         sanitized_parts = []
         for part in content:
@@ -44,7 +44,10 @@ def _sanitize_prompt_content(content, *, role: str, client_profile: str):
             if part.get("type") != "text":
                 sanitized_parts.append(part)
                 continue
-            sanitized_text = sanitize_openclaw_prompt_text(part.get("text", ""), role)
+            if role == "system":
+                sanitized_text = sanitize_runtime_prompt_text(part.get("text", ""), role)
+            else:
+                sanitized_text = sanitize_openclaw_user_text(part.get("text", "")) if client_profile == OPENCLAW_OPENAI_PROFILE and role == "user" else part.get("text", "")
             sanitized_part = dict(part)
             sanitized_part["text"] = sanitized_text
             sanitized_parts.append(sanitized_part)
@@ -365,7 +368,7 @@ def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_
         system_prompt = " ".join(part.get("text", "") for part in sys_field if isinstance(part, dict))
     elif isinstance(sys_field, str):
         system_prompt = sys_field
-    system_prompt = sanitize_openclaw_prompt_text(system_prompt, "system") if resolved_client_profile == OPENCLAW_OPENAI_PROFILE else system_prompt
+    system_prompt = sanitize_runtime_prompt_text(system_prompt, "system")
     if not system_prompt:
         for message in messages:
             if message.get("role") == "system":

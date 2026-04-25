@@ -14,10 +14,11 @@ OPENCLAW_STARTUP_PATTERNS = (
 )
 OPENCLAW_UNTRUSTED_METADATA_PREFIX = "Sender (untrusted metadata):"
 OPENCODE_SYSTEM_PREFIX = "you are opencode"
-OPENCLAW_RUNTIME_SYSTEM_MARKERS = (
-    "you are a personal assistant running inside openclaw",
+AGENT_RUNTIME_SYSTEM_MARKERS = (
+    "you are a personal assistant running inside",
     "tool availability (filtered by policy):",
     "## tooling",
+    "the opencode system prompt may describe native or built-in tool syntax.",
 )
 
 QWEN_CODE_SYSTEM_HINTS = ("qwen code", "qwen-code", "you are qwen code", "you are qwen-code")
@@ -186,23 +187,21 @@ def sanitize_openclaw_user_text(text: str) -> str:
     return cleaned
 
 
-def is_openclaw_runtime_prose(text: str, role: str) -> bool:
+def is_agent_runtime_prose(text: str, role: str) -> bool:
     if not isinstance(text, str):
         return False
     lowered = text.strip().lower()
     if not lowered:
         return False
     if role == "system":
-        return any(marker in lowered for marker in OPENCLAW_RUNTIME_SYSTEM_MARKERS)
+        return any(marker in lowered for marker in AGENT_RUNTIME_SYSTEM_MARKERS)
     return False
 
 
-def sanitize_openclaw_prompt_text(text: str, role: str) -> str:
+def sanitize_runtime_prompt_text(text: str, role: str) -> str:
     if not isinstance(text, str):
         return ""
-    if role == "user":
-        return sanitize_openclaw_user_text(text)
-    if is_openclaw_runtime_prose(text, role):
+    if role == "system" and is_agent_runtime_prose(text, role):
         return ""
     return text
 
@@ -344,6 +343,6 @@ __all__ = [
     "normalized_tool_name",
     "request_looks_like_coding_task",
     "sanitize_openclaw_user_text",
-    "sanitize_openclaw_prompt_text",
-    "is_openclaw_runtime_prose",
+    "sanitize_runtime_prompt_text",
+    "is_agent_runtime_prose",
 ]

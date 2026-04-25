@@ -68,7 +68,7 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertIn("Human (CURRENT TASK - TOP PRIORITY): Now inspect README.md", result.prompt)
         self.assertTrue(result.prompt.endswith("Assistant:"))
 
-    def test_messages_to_prompt_strips_openclaw_runtime_system_prose(self) -> None:
+    def test_messages_to_prompt_strips_agent_runtime_system_prose(self) -> None:
         req_data = {
             "system": "You are a personal assistant running inside OpenClaw.\n## Tooling\nTool availability (filtered by policy):\n- read: Read file contents\n- write: Create or overwrite files",
             "messages": [
@@ -89,6 +89,27 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
         self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
         self.assertIn("Human (CURRENT TASK - TOP PRIORITY): Find the target file and explain it", result.prompt)
+
+    def test_messages_to_prompt_strips_opencode_runtime_system_prose(self) -> None:
+        req_data = {
+            "system": "You are a personal assistant running inside SomeAgent.\n## Tooling\nTool availability (filtered by policy):\n- read: Read file contents",
+            "messages": [
+                {"role": "user", "content": "Summarize the repository layout"},
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=CLAUDE_CODE_OPENAI_PROFILE)
+
+        self.assertNotIn("running inside SomeAgent", result.prompt)
+        self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
+        self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
 
     def test_messages_to_prompt_keeps_normal_system_prompt(self) -> None:
         req_data = {
