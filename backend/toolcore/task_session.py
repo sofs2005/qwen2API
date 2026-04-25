@@ -224,7 +224,7 @@ def build_retry_rebase_prompt(request: StandardRequest, *, reason: str | None = 
             tool_name = reason.split(':', 1)[1] or 'Read'
             guidance = (
                 f'[MANDATORY NEXT STEP]: You are stuck rereading the same file with {tool_name}. '
-                'Do NOT call Read/read_file on that same target again. Use the current file content and move forward to edit, write, verify, or finish.'
+                'Do NOT keep rereading the same target. Use the current file content to continue the analysis, inspect a different relevant file if needed, run a targeted non-listing command, or finish if you already have enough information.'
             )
         elif reason.startswith('blocked_tool_name:'):
             tool_name = reason.split(':', 1)[1] or 'the requested tool'
@@ -238,12 +238,12 @@ def build_retry_rebase_prompt(request: StandardRequest, *, reason: str | None = 
             count_text = parts[2] if len(parts) > 2 and parts[2] else 'multiple'
             guidance = (
                 f'[MANDATORY NEXT STEP]: You are in an exploration loop ({count_text} exploratory calls in a row, latest: {tool_name}). '
-                'Stop browsing directories or rereading files. Use the results already in history and force progress to the concrete target file, edit/write step, real command execution, or final answer.'
+                'Stop broad exploration. Use the results already in history to narrow the scope, inspect a different relevant file, run a more targeted non-listing command, or provide the final answer.'
             )
         elif reason == 'unchanged_read_result':
             guidance = (
                 "[MANDATORY NEXT STEP]: You already received 'Unchanged since last read'. "
-                'Do NOT call Read again on the same target. Use the current file content and move to edit, write, verify, or a final answer.'
+                'Do NOT call Read again on the same target. Use the current file content to continue the analysis, inspect a different relevant file if needed, or provide the final answer.'
             )
         elif reason == 'search_no_results':
             guidance = (
