@@ -177,6 +177,30 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
         self.assertIn("请检查这个脚本的内容", result.prompt)
 
+    def test_messages_to_prompt_strips_skill_bootstrap_from_latest_user_line(self) -> None:
+        req_data = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "The following skills provide specialized instructions for specific tasks.\n\nUse the read tool to load a skill's file when the task matches its name.\n\n<available_skills>\n  <skill>\n    <name>agent-orchestrator</name>\n    <location>~/.openclaw/workspace/skills/agent-orchestrator/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>ai-daily-digest</name>\n    <location>~/.openclaw/workspace/skills/ai-daily-digest/SKILL.md</location>\n  </skill>\n</available_skills>\n\n请阅读本地脚本并解释它如何抓取限免信息",
+                },
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertNotIn("The following skills provide specialized instructions", result.prompt)
+        self.assertNotIn("<available_skills>", result.prompt)
+        self.assertNotIn("agent-orchestrator", result.prompt)
+        self.assertIn("请阅读本地脚本并解释它如何抓取限免信息", result.prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,10 @@ AGENT_RUNTIME_SYSTEM_MARKERS = (
     "## tooling",
     "the opencode system prompt may describe native or built-in tool syntax.",
 )
+SKILL_BOOTSTRAP_PREFIXES = (
+    "the following skills provide specialized instructions for specific tasks.",
+    "use the read tool to load a skill's file when the task matches its name.",
+)
 
 QWEN_CODE_SYSTEM_HINTS = ("qwen code", "qwen-code", "you are qwen code", "you are qwen-code")
 QWEN_CODE_OPENAI_TOOL_NAMES = frozenset({
@@ -184,6 +188,9 @@ def sanitize_openclaw_user_text(text: str) -> str:
             cleaned = match.group(1).strip()
         else:
             return ""
+    lowered = cleaned.lower()
+    if all(prefix in lowered for prefix in SKILL_BOOTSTRAP_PREFIXES) and "<available_skills>" in lowered:
+        cleaned = re.sub(r"(?is)^.*?</available_skills>\s*", "", cleaned).strip()
     if is_agent_runtime_prose(cleaned, "assistant") or is_agent_runtime_prose(cleaned, "user"):
         cleaned = re.sub(r"(?is)^.*?tool availability \(filtered by policy\):.*?(?:\n\n|$)", "", cleaned).strip()
         cleaned = re.sub(r"(?is)^you are a personal assistant running inside .*?(?:\n\n|$)", "", cleaned).strip()
