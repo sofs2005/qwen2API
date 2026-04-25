@@ -105,6 +105,14 @@ class RuntimeAttemptCursor:
 
 
 TRAILING_IDLE_AFTER_TOOL_SECONDS = 2.0
+ANALYSIS_TASK_REGEX = re.compile(
+    r"(analy[sz]e|analysis|inspect|review|understand|explain|summari[sz]e|investigate|look into|check|脚本|分析|解释|查看|阅读|读一下|看看|排查|理解|总结)",
+    re.IGNORECASE,
+)
+MUTATION_TASK_REGEX = re.compile(
+    r"(edit|write|modify|patch|refactor|fix|implement|create|update|delete|rename|写入|修改|修复|实现|创建|更新|删除|重构)",
+    re.IGNORECASE,
+)
 
 
 __all__ = [
@@ -212,6 +220,31 @@ def _recent_message_texts(messages: list[dict[str, Any]] | None, *, limit: int =
         if checked >= limit:
             break
     return texts
+
+
+def task_prefers_analysis(current_prompt: str, history_messages: list[dict[str, Any]] | None) -> bool:
+    candidates = [str(current_prompt or "")]
+    for msg in reversed(history_messages or []):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            candidates.append(content)
+        elif isinstance(content, list):
+            text = "\n".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            if text:
+                candidates.append(text)
+        break
+    merged = "\n".join(text for text in candidates if text)
+    if not merged:
+        return False
+    if MUTATION_TASK_REGEX.search(merged):
+        return False
+    return bool(ANALYSIS_TASK_REGEX.search(merged))
 
 
 def has_recent_unchanged_read_result(messages: list[dict[str, Any]] | None) -> bool:
@@ -816,6 +849,7 @@ def evaluate_retry_directive(
         )
 
     if request.tools:
+        analysis_task = task_prefers_analysis(current_prompt, history_messages)
         directive: RuntimeToolDirective | None = None
         if state.answer_text:
             saw_contract_markup = should_retry_textual_tool_contract(state.answer_text)
@@ -890,47 +924,79 @@ def evaluate_retry_directive(
                     first_tool_name,
                     first_tool_input,
                 )
-                repeated_same_tool = repeated_count >= 1
-                repeated_same_read = is_read_tool_name(first_tool_name) and repeated_count >= 1
+                repeated_same_read = is_read_tool_name(first_tool_name) and repeated_count >= (2 if analysis_task else 1)
+                repeated_same_tool = repeated_count >= 1 and not (
+                    analysis_task and is_read_tool_name(first_tool_name) and repeated_count == 1
+                )
                 if repeated_same_read and can_retry_after_output:
                     read_target = read_target_path(first_tool_input) or "the same file"
-                    force_text = (
-                        f"[强制要求]: 你已经连续重复读取同一个文件：{read_target}。"
-                        "这是无效循环。不要再次调用 Read/read_file。"
-                        "直接使用现有读取结果，进入编辑、写入、运行验证，或直接完成回答。"
-                        f"\n[MANDATORY]: You already reread the same file in a loop: {read_target}. "
-                        "Do NOT call Read/read_file on that same target again. "
-                        "Use the existing file content and move forward to edit, write, verify, or finish the answer."
-                    )
+                    if analysis_task:
+                        force_text = (
+                            f"[强制要求]: 你已经连续重复读取同一个文件：{read_target}。"
+                            "不要继续盲目重复读取同一目标。"
+                            "优先基于现有读取结果继续分析；如确有必要，再读取不同的相关文件，或执行有针对性的非列表命令。"
+                            f"\n[MANDATORY]: You already reread the same file in a loop: {read_target}. "
+                            "Do not keep blindly rereading the same target. "
+                            "Prefer continuing the analysis from the current file content; if needed, inspect a different relevant file or run a targeted non-listing command."
+                        )
+                    else:
+                        force_text = (
+                            f"[强制要求]: 你已经连续重复读取同一个文件：{read_target}。"
+                            "这是无效循环。不要再次调用 Read/read_file。"
+                            "直接使用现有读取结果，进入编辑、写入、运行验证，或直接完成回答。"
+                            f"\n[MANDATORY]: You already reread the same file in a loop: {read_target}. "
+                            "Do NOT call Read/read_file on that same target again. "
+                            "Use the existing file content and move forward to edit, write, verify, or finish the answer."
+                        )
                     return _retry(
                         f"repeated_same_read:{first_tool_name}",
                         inject_assistant_message(current_prompt, force_text),
                     )
                 if repeated_same_tool and can_retry_after_output:
-                    force_text = (
-                        f"[强制要求]: 你已经用相同参数调用了 {first_tool_name}。"
-                        "不要重复相同的工具调用。"
-                        "使用已有的工具结果，选择下一个相关工具或完成任务。"
-                        "如果是配置文件任务，读取一次后直接编辑/写入文件，不要重复读取。"
-                        f"\n[MANDATORY]: You already called {first_tool_name} with the same input. "
-                        "Do NOT repeat the same tool call. "
-                        "Use the tool result you already have and either choose the next relevant tool or finish the task. "
-                        "If this is a config-file task, read once and then edit/write the file instead of rereading it."
-                    )
+                    if analysis_task:
+                        force_text = (
+                            f"[强制要求]: 你已经用相同参数调用了 {first_tool_name}。"
+                            "不要重复相同的工具调用。"
+                            "使用已有结果继续分析，改为查看不同的相关文件、执行更有针对性的命令，或在信息足够时直接回答。"
+                            f"\n[MANDATORY]: You already called {first_tool_name} with the same input. "
+                            "Do NOT repeat the same tool call. "
+                            "Continue the analysis from the result you already have, inspect a different relevant file, run a more targeted command, or answer if you already have enough information."
+                        )
+                    else:
+                        force_text = (
+                            f"[强制要求]: 你已经用相同参数调用了 {first_tool_name}。"
+                            "不要重复相同的工具调用。"
+                            "使用已有的工具结果，选择下一个相关工具或完成任务。"
+                            "如果是配置文件任务，读取一次后直接编辑/写入文件，不要重复读取。"
+                            f"\n[MANDATORY]: You already called {first_tool_name} with the same input. "
+                            "Do NOT repeat the same tool call. "
+                            "Use the tool result you already have and either choose the next relevant tool or finish the task. "
+                            "If this is a config-file task, read once and then edit/write the file instead of rereading it."
+                        )
                     return _retry(
                         f"repeated_same_tool:{first_tool_name}",
                         inject_assistant_message(current_prompt, force_text),
                     )
                 exploration_count = recent_exploration_tool_count(history_messages)
-                if is_exploration_tool_call(first_tool_name, first_tool_input) and exploration_count >= 2 and can_retry_after_output:
-                    force_text = (
-                        f"[强制要求]: 你已经连续进行了 {exploration_count} 次探索型工具调用，最近一次是 {first_tool_name}。"
-                        "不要继续用 Read/read_file、Glob/list_directory、Bash/run_shell_command(ls/pwd/tree/find) 做泛探索。"
-                        "必须基于已有结果强制推进：锁定目标文件后直接编辑/写入，执行真正需要的命令，或直接完成回答。"
-                        f"\n[MANDATORY]: You are in an exploration loop ({exploration_count} exploratory calls in a row, latest: {first_tool_name}). "
-                        "Do NOT keep exploring with Read/read_file, Glob/list_directory, or Bash/run_shell_command listing commands. "
-                        "Force progress now: pick the concrete target file and edit/write it, run the real non-listing command you need, or finish the answer."
-                    )
+                exploration_threshold = 3 if analysis_task else 2
+                if is_exploration_tool_call(first_tool_name, first_tool_input) and exploration_count >= exploration_threshold and can_retry_after_output:
+                    if analysis_task:
+                        force_text = (
+                            f"[强制要求]: 你已经连续进行了 {exploration_count} 次探索型工具调用，最近一次是 {first_tool_name}。"
+                            "不要继续泛探索同类目标。"
+                            "请基于已有结果收缩范围：读取不同的关键文件、执行更有针对性的非列表命令，或直接给出分析结论。"
+                            f"\n[MANDATORY]: You are in an exploration loop ({exploration_count} exploratory calls in a row, latest: {first_tool_name}). "
+                            "Do not keep doing broad exploratory reads or listing commands. Narrow the scope using the results you already have: inspect a different key file, run a more targeted non-listing command, or provide the analysis directly."
+                        )
+                    else:
+                        force_text = (
+                            f"[强制要求]: 你已经连续进行了 {exploration_count} 次探索型工具调用，最近一次是 {first_tool_name}。"
+                            "不要继续用 Read/read_file、Glob/list_directory、Bash/run_shell_command(ls/pwd/tree/find) 做泛探索。"
+                            "必须基于已有结果强制推进：锁定目标文件后直接编辑/写入，执行真正需要的命令，或直接完成回答。"
+                            f"\n[MANDATORY]: You are in an exploration loop ({exploration_count} exploratory calls in a row, latest: {first_tool_name}). "
+                            "Do NOT keep exploring with Read/read_file, Glob/list_directory, or Bash/run_shell_command listing commands. "
+                            "Force progress now: pick the concrete target file and edit/write it, run the real non-listing command you need, or finish the answer."
+                        )
                     return _retry(
                         f"exploration_loop:{first_tool_name}:{exploration_count}",
                         inject_assistant_message(current_prompt, force_text),

@@ -114,6 +114,49 @@ class ExecutionToolChoiceRetryTests(unittest.TestCase):
 
         self.assertFalse(retry.retry)
 
+    def test_analysis_task_does_not_retry_first_same_read(self) -> None:
+        request = StandardRequest(
+            prompt="Human: analyze this local script and explain how it works\n\nAssistant:",
+            response_model="gpt-4.1",
+            resolved_model="qwen3.6-plus",
+            surface="openai",
+            tools=[{"name": "read", "parameters": {}}],
+            tool_names=["read"],
+            tool_enabled=True,
+        )
+
+        history_messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_old",
+                        "type": "function",
+                        "function": {
+                            "name": "read",
+                            "arguments": '{"path": "script.py"}',
+                        },
+                    }
+                ],
+            }
+        ]
+
+        retry = evaluate_retry_directive(
+            request=request,
+            current_prompt=request.prompt,
+            history_messages=history_messages,
+            attempt_index=0,
+            max_attempts=2,
+            state=RuntimeAttemptState(
+                answer_text='##TOOL_CALL##\n{"name": "read", "input": {"path": "script.py"}}\n##END_CALL##',
+                emitted_visible_output=True,
+            ),
+            allow_after_visible_output=True,
+        )
+
+        self.assertFalse(retry.retry)
+
 
 if __name__ == "__main__":
     unittest.main()
