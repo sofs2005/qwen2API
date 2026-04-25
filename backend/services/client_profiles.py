@@ -184,6 +184,9 @@ def sanitize_openclaw_user_text(text: str) -> str:
             cleaned = match.group(1).strip()
         else:
             return ""
+    if is_agent_runtime_prose(cleaned, "assistant") or is_agent_runtime_prose(cleaned, "user"):
+        cleaned = re.sub(r"(?is)^.*?tool availability \(filtered by policy\):.*?(?:\n\n|$)", "", cleaned).strip()
+        cleaned = re.sub(r"(?is)^you are a personal assistant running inside .*?(?:\n\n|$)", "", cleaned).strip()
     return cleaned
 
 
@@ -193,7 +196,7 @@ def is_agent_runtime_prose(text: str, role: str) -> bool:
     lowered = text.strip().lower()
     if not lowered:
         return False
-    if role == "system":
+    if role in {"system", "assistant", "user"}:
         return any(marker in lowered for marker in AGENT_RUNTIME_SYSTEM_MARKERS)
     return False
 

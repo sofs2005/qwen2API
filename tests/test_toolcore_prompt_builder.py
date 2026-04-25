@@ -130,6 +130,53 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
 
         self.assertIn("<system>\nYou are a careful code reviewer.\n</system>", result.prompt)
 
+    def test_messages_to_prompt_strips_agent_runtime_assistant_history(self) -> None:
+        req_data = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "You are a personal assistant running inside OpenClaw.\n## Tooling\nTool availability (filtered by policy):\n- read: Read file contents",
+                },
+                {"role": "user", "content": "请分析这个脚本的作用"},
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertNotIn("running inside OpenClaw", result.prompt)
+        self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
+        self.assertIn("Human (CURRENT TASK - TOP PRIORITY): 请分析这个脚本的作用", result.prompt)
+
+    def test_messages_to_prompt_strips_agent_runtime_user_wrapper_but_keeps_task(self) -> None:
+        req_data = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "You are a personal assistant running inside OpenClaw.\n## Tooling\nTool availability (filtered by policy):\n- read: Read file contents\n\n请检查这个脚本的内容",
+                },
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertNotIn("running inside OpenClaw", result.prompt)
+        self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
+        self.assertIn("请检查这个脚本的内容", result.prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
