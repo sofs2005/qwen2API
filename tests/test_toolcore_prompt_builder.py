@@ -68,6 +68,47 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertIn("Human (CURRENT TASK - TOP PRIORITY): Now inspect README.md", result.prompt)
         self.assertTrue(result.prompt.endswith("Assistant:"))
 
+    def test_messages_to_prompt_strips_openclaw_runtime_system_prose(self) -> None:
+        req_data = {
+            "system": "You are a personal assistant running inside OpenClaw.\n## Tooling\nTool availability (filtered by policy):\n- read: Read file contents\n- write: Create or overwrite files",
+            "messages": [
+                {"role": "user", "content": "Find the target file and explain it"},
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertNotIn("running inside OpenClaw", result.prompt)
+        self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
+        self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
+        self.assertIn("Human (CURRENT TASK - TOP PRIORITY): Find the target file and explain it", result.prompt)
+
+    def test_messages_to_prompt_keeps_normal_system_prompt(self) -> None:
+        req_data = {
+            "system": "You are a careful code reviewer.",
+            "messages": [
+                {"role": "user", "content": "Review this diff"},
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertIn("<system>\nYou are a careful code reviewer.\n</system>", result.prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

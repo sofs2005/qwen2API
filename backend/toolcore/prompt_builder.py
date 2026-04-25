@@ -9,6 +9,7 @@ from backend.services.client_profiles import (
     CLAUDE_CODE_OPENAI_PROFILE,
     OPENCLAW_OPENAI_PROFILE,
     QWEN_CODE_OPENAI_PROFILE,
+    sanitize_openclaw_prompt_text,
     looks_like_opencode_system_prompt,
     sanitize_openclaw_user_text,
 )
@@ -27,6 +28,28 @@ class PromptBuildResult:
     tools: list[dict]
     tool_enabled: bool
     client_profile: str
+
+
+def _sanitize_prompt_content(content, *, role: str, client_profile: str):
+    if client_profile != OPENCLAW_OPENAI_PROFILE:
+        return content
+    if isinstance(content, str):
+        return sanitize_openclaw_prompt_text(content, role)
+    if isinstance(content, list):
+        sanitized_parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                sanitized_parts.append(part)
+                continue
+            if part.get("type") != "text":
+                sanitized_parts.append(part)
+                continue
+            sanitized_text = sanitize_openclaw_prompt_text(part.get("text", ""), role)
+            sanitized_part = dict(part)
+            sanitized_part["text"] = sanitized_text
+            sanitized_parts.append(sanitized_part)
+        return sanitized_parts
+    return content
 
 
 def _sanitize_openclaw_user_text(text: str) -> str:
@@ -319,7 +342,20 @@ def build_prompt_with_tools(
 
 def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> PromptBuildResult:
     resolved_client_profile = client_profile
-    messages = req_data.get("messages", [])
+    raw_messages = req_data.get("messages", [])
+    messages = []
+    for message in raw_messages:
+        if not isinstance(message, dict):
+            messages.append(message)
+            continue
+        role = str(message.get("role", "") or "")
+        sanitized_message = dict(message)
+        sanitized_message["content"] = _sanitize_prompt_content(
+            message.get("content", ""),
+            role=role,
+            client_profile=resolved_client_profile,
+        )
+        messages.append(sanitized_message)
     tools = normalize_prompt_tools(req_data.get("tools", []))
     tool_enabled = bool(tools)
     tool_choice = normalize_tool_choice(req_data.get("tool_choice"))
@@ -329,6 +365,7 @@ def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_
         system_prompt = " ".join(part.get("text", "") for part in sys_field if isinstance(part, dict))
     elif isinstance(sys_field, str):
         system_prompt = sys_field
+    system_prompt = sanitize_openclaw_prompt_text(system_prompt, "system") if resolved_client_profile == OPENCLAW_OPENAI_PROFILE else system_prompt
     if not system_prompt:
         for message in messages:
             if message.get("role") == "system":

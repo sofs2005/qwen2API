@@ -14,6 +14,11 @@ OPENCLAW_STARTUP_PATTERNS = (
 )
 OPENCLAW_UNTRUSTED_METADATA_PREFIX = "Sender (untrusted metadata):"
 OPENCODE_SYSTEM_PREFIX = "you are opencode"
+OPENCLAW_RUNTIME_SYSTEM_MARKERS = (
+    "you are a personal assistant running inside openclaw",
+    "tool availability (filtered by policy):",
+    "## tooling",
+)
 
 QWEN_CODE_SYSTEM_HINTS = ("qwen code", "qwen-code", "you are qwen code", "you are qwen-code")
 QWEN_CODE_OPENAI_TOOL_NAMES = frozenset({
@@ -181,6 +186,27 @@ def sanitize_openclaw_user_text(text: str) -> str:
     return cleaned
 
 
+def is_openclaw_runtime_prose(text: str, role: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    lowered = text.strip().lower()
+    if not lowered:
+        return False
+    if role == "system":
+        return any(marker in lowered for marker in OPENCLAW_RUNTIME_SYSTEM_MARKERS)
+    return False
+
+
+def sanitize_openclaw_prompt_text(text: str, role: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    if role == "user":
+        return sanitize_openclaw_user_text(text)
+    if is_openclaw_runtime_prose(text, role):
+        return ""
+    return text
+
+
 def extract_user_text_only(content: Any, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
     if isinstance(content, str):
         return sanitize_openclaw_user_text(content) if client_profile == OPENCLAW_OPENAI_PROFILE else content
@@ -318,4 +344,6 @@ __all__ = [
     "normalized_tool_name",
     "request_looks_like_coding_task",
     "sanitize_openclaw_user_text",
+    "sanitize_openclaw_prompt_text",
+    "is_openclaw_runtime_prose",
 ]
