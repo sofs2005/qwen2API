@@ -211,8 +211,11 @@ def is_agent_runtime_prose(text: str, role: str) -> bool:
 def sanitize_runtime_prompt_text(text: str, role: str) -> str:
     if not isinstance(text, str):
         return ""
-    if role == "system" and is_agent_runtime_prose(text, role):
-        return ""
+    if role == "system":
+        if is_agent_runtime_prose(text, role):
+            return ""
+        if looks_like_opencode_system_prompt(text):
+            return ""
     return text
 
 

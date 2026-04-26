@@ -21,6 +21,30 @@ from backend.toolcore.prompt_contract import (
 
 log = logging.getLogger("qwen2api.prompt")
 
+AGENT_RUNTIME_NATIVE_TOOL_NAMES = frozenset(
+    {
+        "bash",
+        "edit",
+        "glob",
+        "grep",
+        "ls",
+        "multiedit",
+        "notebookedit",
+        "read",
+        "task",
+        "todowrite",
+        "webfetch",
+        "write",
+    }
+)
+
+AGENT_RUNTIME_NATIVE_TOOL_PROFILES = frozenset(
+    {
+        CLAUDE_CODE_OPENAI_PROFILE,
+        OPENCLAW_OPENAI_PROFILE,
+    }
+)
+
 
 @dataclass(slots=True)
 class PromptBuildResult:
@@ -130,6 +154,14 @@ def _safe_preview(text: str, limit: int = 240) -> str:
 
 def _is_heavy_tool_profile(client_profile: str) -> bool:
     return client_profile in {CLAUDE_CODE_OPENAI_PROFILE, QWEN_CODE_OPENAI_PROFILE}
+
+
+def _filter_agent_runtime_native_tools(tools: list[dict]) -> list[dict]:
+    return [
+        tool
+        for tool in tools
+        if str(tool.get("name", "")).strip().lower() not in AGENT_RUNTIME_NATIVE_TOOL_NAMES
+    ]
 
 
 def build_prompt_with_tools(
@@ -360,6 +392,8 @@ def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_
         )
         messages.append(sanitized_message)
     tools = normalize_prompt_tools(req_data.get("tools", []))
+    if resolved_client_profile in AGENT_RUNTIME_NATIVE_TOOL_PROFILES:
+        tools = _filter_agent_runtime_native_tools(tools)
     tool_enabled = bool(tools)
     tool_choice = normalize_tool_choice(req_data.get("tool_choice"))
     system_prompt = ""
