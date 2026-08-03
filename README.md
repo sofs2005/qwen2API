@@ -4,7 +4,7 @@
 [![Stars](https://img.shields.io/github/stars/sofs2005/qwen2API?style=flat-square)](https://github.com/sofs2005/qwen2API/stargazers)
 [![Forks](https://img.shields.io/github/forks/sofs2005/qwen2API?style=flat-square)](https://github.com/sofs2005/qwen2API/network/members)
 [![Release](https://img.shields.io/github/v/release/sofs2005/qwen2API?style=flat-square)](https://github.com/sofs2005/qwen2API/releases)
-[![Docker Pulls](https://img.shields.io/docker/pulls/softs2005/qwen2api?style=flat-square)](https://hub.docker.com/r/softs2005/qwen2api)
+[![GHCR](https://img.shields.io/badge/ghcr.io-q2a-blue?style=flat-square&logo=github)](https://github.com/sofs2005/qwen2API/pkgs/container/q2a)
 
 [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/qwen2api)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsofs2005%2Fqwen2API)
@@ -241,7 +241,7 @@ mkdir -p data logs
 ```yaml
 services:
   qwen2api:
-    image: softs2005/qwen2api:latest
+    image: ghcr.io/sofs2005/q2a:dev
     container_name: qwen2api
     restart: unless-stopped
     env_file:
@@ -314,7 +314,7 @@ UPLOADED_FILES_FILE=/workspace/data/uploaded_files.json
 
 | 配置项 | 说明 | 建议修改 |
 |--------|------|----------|
-| `image` | 预构建镜像地址，支持 amd64/arm64 | 保持默认 `softs2005/qwen2api:latest` |
+| `image` | 预构建镜像地址，支持 amd64/arm64 | 保持默认 `ghcr.io/sofs2005/q2a:dev` |
 | `ports` | 端口映射，格式：`宿主机端口:容器端口` | 如 7860 被占用，改为 `"8080:7860"` |
 | `volumes` | 数据持久化挂载 | **必须保留**，否则重启后数据丢失 |
 | `shm_size` | 浏览器共享内存 | 浏览器崩溃时改为 `"512m"` |
@@ -420,7 +420,7 @@ python start.py
 ```yaml
 services:
   qwen2api:
-    image: softs2005/qwen2api:latest
+    image: ghcr.io/sofs2005/q2a:dev
     container_name: qwen2api
     restart: unless-stopped
     env_file:
