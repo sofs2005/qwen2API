@@ -1,6 +1,6 @@
 services:
   qwen2api:
-    image: softs2005/qwen2api:latest
+    image: ghcr.io/sofs2005/q2a:dev
     container_name: qwen2api
     restart: unless-stopped
     env_file:
