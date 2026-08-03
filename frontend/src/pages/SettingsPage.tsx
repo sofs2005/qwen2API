@@ -145,7 +145,7 @@ export default function SettingsPage() {
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer YOUR_API_KEY" \
     -d '{
-      "model": "qwen3.8-max-preview",
+      "model": "qwen3.8-max",
       "prompt": "A cyberpunk cat with neon lights, ultra realistic",
       "n": 1,
       "size": "1024x1024",

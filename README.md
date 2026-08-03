@@ -148,18 +148,16 @@ flowchart LR
 
 ## 模型映射
 
-当前默认将主流客户端模型名称统一映射至 `qwen3.6-plus`。
+当前只提供两个稳定短别名，实际调用的上游模型由环境变量控制：
 
-| 传入模型名 | 实际调用 |
-|---|---|
-| `gpt-4o` / `gpt-4-turbo` / `gpt-4.1` / `o1` / `o3` | `qwen3.6-plus` |
-| `gpt-4o-mini` / `gpt-3.5-turbo` | `qwen3.6-plus` |
-| `claude-opus-4-6` / `claude-sonnet-4-6` / `claude-3-5-sonnet` | `qwen3.6-plus` |
-| `claude-3-haiku` / `claude-haiku-4-5` | `qwen3.6-plus` |
-| `gemini-2.5-pro` / `gemini-2.5-flash` / `gemini-1.5-pro` | `qwen3.6-plus` |
-| `deepseek-chat` / `deepseek-reasoner` | `qwen3.6-plus` |
+| 传入模型名 | 默认实际调用 | 配置变量 |
+|---|---|---|
+| `qwen-max` | `qwen3.8-max` | `QWEN_MAX_MODEL` |
+| `qwen-plus` | `qwen3.7-plus` | `QWEN_PLUS_MODEL` |
 
-未命中映射表时，默认回退为传入模型名本身；若管理台设置了自定义映射规则，则以配置为准。
+未命中映射表时，默认回退为传入模型名本身；若管理台设置了自定义映射规则，则以运行时配置为准。
+
+预热模型默认跟随这两个别名的当前目标。也可以通过 `CHAT_ID_PREWARM_MODELS` 传入逗号分隔的模型名；其中的短别名会先按同一套映射解析，显式设为空可关闭默认模型预热。
 
 ---
 
@@ -168,7 +166,7 @@ flowchart LR
 qwen2API 提供与 OpenAI Images 接口兼容的图片生成能力。
 
 - 接口：`POST /v1/images/generations`
-- 默认模型：由环境变量 `IMAGE_GENERATION_MODEL` 控制（默认 `qwen3.8-max-preview`；不再使用 `dall-e-*` 别名）
+- 默认模型：由环境变量 `IMAGE_GENERATION_MODEL` 控制（默认 `qwen3.8-max`；不再使用 `dall-e-*` 别名）。
 - 实际链路：千问网页 `image_gen` 工具 → CDN 回源转存 → 同源 `/v1/images/content/{id}`
 - 返回：本地托管图片 URL（避免 `cdn.qwenlm.ai` 签名链在浏览器 403）
 - 生图本地缓存 TTL：`GENERATED_IMAGE_TTL_SECONDS`（默认 3600）
@@ -180,7 +178,7 @@ curl http://127.0.0.1:7860/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
-    "model": "qwen3.8-max-preview",
+    "model": "qwen3.8-max",
     "prompt": "一只赛博朋克风格的猫，霓虹灯背景，超写实",
     "n": 1,
     "size": "1024x1024",

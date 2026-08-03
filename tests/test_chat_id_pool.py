@@ -119,7 +119,7 @@ class ChatIDPoolTests(unittest.IsolatedAsyncioTestCase):
             patch("backend.services.chat_id_pool.settings.WAF_RETRY_EXTRA_COOLDOWN_SECONDS", 5),
             patch("backend.services.chat_id_pool.asyncio.sleep", new=AsyncMock()),
         ):
-            await chat_pool._create_warm_chat(asyncio.Semaphore(1), account, "qwen3.8-max-preview", "t2t")
+            await chat_pool._create_warm_chat(asyncio.Semaphore(1), account, "qwen3.8-max", "t2t")
 
         self.assertEqual(account.waf_cookies_expires_at, 0)
         self.assertEqual(account.waf_cookies, "")
@@ -153,6 +153,43 @@ class ChatIDPoolTests(unittest.IsolatedAsyncioTestCase):
                 (account.email, "qwen3.6-plus", "t2t"),
                 (account.email, "qwen3.6-plus", "t2t"),
             ],
+        )
+
+    async def test_prewarm_aliases_resolve_to_canonical_models(self) -> None:
+        account = Account(email="alice@example.com", token="token-1")
+        pool = SimpleNamespace(accounts=[account], get_by_email=lambda email: account)
+        created = []
+
+        async def fake_create_chat(acc, model, chat_type="t2t"):
+            created.append(model)
+            return f"chat-{len(created)}"
+
+        client = SimpleNamespace(executor=SimpleNamespace(create_chat=fake_create_chat), delete_chat=AsyncMock())
+
+        with patch("backend.services.chat_id_pool.settings.CHAT_ID_PREWARM_MODELS", "qwen-max,qwen-plus"):
+            chat_pool = ChatIDPool(client, pool)
+            await chat_pool.fill()
+
+        self.assertEqual(set(created), {"qwen3.8-max", "qwen3.7-plus"})
+
+    async def test_default_prewarm_models_follow_alias_targets(self) -> None:
+        account = Account(email="alice@example.com", token="token-1")
+        pool = SimpleNamespace(accounts=[account], get_by_email=lambda email: account)
+        created = []
+
+        async def fake_create_chat(acc, model, chat_type="t2t"):
+            created.append((acc.email, model, chat_type))
+            return f"chat-{len(created)}"
+
+        client = SimpleNamespace(executor=SimpleNamespace(create_chat=fake_create_chat), delete_chat=AsyncMock())
+
+        with patch("backend.services.chat_id_pool.settings.CHAT_ID_PREWARM_MODELS", None):
+            chat_pool = ChatIDPool(client, pool)
+            await chat_pool.fill()
+
+        self.assertEqual(
+            {model for _, model, _ in created},
+            {"qwen3.8-max", "qwen3.7-plus"},
         )
 
     async def test_fill_skips_busy_accounts(self) -> None:

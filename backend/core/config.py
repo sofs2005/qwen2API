@@ -7,6 +7,11 @@ from typing import Dict, Set
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 
+DEFAULT_QWEN_MAX_MODEL = "qwen3.8-max"
+DEFAULT_QWEN_PLUS_MODEL = "qwen3.7-plus"
+DEFAULT_QWEN_WEB_VERSION = "0.2.81"
+DEFAULT_QWEN_BX_VERSION = "2.5.37"
+
 class Settings(BaseSettings):
     # 服务配置
     PORT: int = int(os.getenv("PORT", 8080))
@@ -30,7 +35,8 @@ class Settings(BaseSettings):
     CHAT_ID_PREWARM_MAX_CONCURRENCY: int = int(os.getenv("CHAT_ID_PREWARM_MAX_CONCURRENCY", 16))
     CHAT_ID_PREWARM_SPREAD_SECONDS: float = float(os.getenv("CHAT_ID_PREWARM_SPREAD_SECONDS", 6))
     CHAT_ID_PREWARM_JITTER_SECONDS: float = float(os.getenv("CHAT_ID_PREWARM_JITTER_SECONDS", 1.5))
-    CHAT_ID_PREWARM_MODELS: str = os.getenv("CHAT_ID_PREWARM_MODELS", "qwen3.8-max-preview,qwen3.7-plus")
+    # 未设置时由 ChatIDPool 跟随 qwen-max/qwen-plus 的当前目标；显式空串可关闭默认预热模型。
+    CHAT_ID_PREWARM_MODELS: str | None = os.getenv("CHAT_ID_PREWARM_MODELS")
     QWEN_CHAT_TRANSPORT_SEND_COOKIES: bool = os.getenv("QWEN_CHAT_TRANSPORT_SEND_COOKIES", "false").lower() in {"1", "true", "yes", "on"}
     # 默认 false：主流式走 curl_cffi（new_session 注入 UPSTREAM_PROXY + TLS 指纹）。
     # 设为 true 时回退 httpx Go-like 路径（TLS 指纹易被 WAF 识别，仅作兼容开关）。
@@ -44,6 +50,12 @@ class Settings(BaseSettings):
 
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    # 对外短别名对应的上游模型；升级模型时优先修改环境变量。
+    QWEN_MAX_MODEL: str = os.getenv("QWEN_MAX_MODEL", DEFAULT_QWEN_MAX_MODEL).strip() or DEFAULT_QWEN_MAX_MODEL
+    QWEN_PLUS_MODEL: str = os.getenv("QWEN_PLUS_MODEL", DEFAULT_QWEN_PLUS_MODEL).strip() or DEFAULT_QWEN_PLUS_MODEL
+    # 官网请求头版本，跟随抓包验证结果，允许部署侧独立调整。
+    QWEN_WEB_VERSION: str = os.getenv("QWEN_WEB_VERSION", DEFAULT_QWEN_WEB_VERSION).strip() or DEFAULT_QWEN_WEB_VERSION
+    QWEN_BX_VERSION: str = os.getenv("QWEN_BX_VERSION", DEFAULT_QWEN_BX_VERSION).strip() or DEFAULT_QWEN_BX_VERSION
     QWEN_CODE_CODER_MODEL: str = os.getenv("QWEN_CODE_CODER_MODEL", "qwen3-coder-plus")
     QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS: bool = os.getenv("QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS", "true").lower() in {"1", "true", "yes", "on"}
     QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS: bool = os.getenv("QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS", "true").lower() in {"1", "true", "yes", "on"}
@@ -93,7 +105,7 @@ class Settings(BaseSettings):
     # 生图回源本地缓存 TTL（秒），到期由 context_cleanup_loop 按 purpose=generated_image 清理
     GENERATED_IMAGE_TTL_SECONDS: int = int(os.getenv("GENERATED_IMAGE_TTL_SECONDS", 3600))
     # /v1/images/generations 默认上游模型；升级时只改 env，无需改代码
-    IMAGE_GENERATION_MODEL: str = os.getenv("IMAGE_GENERATION_MODEL", "qwen3.8-max-preview").strip() or "qwen3.8-max-preview"
+    IMAGE_GENERATION_MODEL: str = os.getenv("IMAGE_GENERATION_MODEL", DEFAULT_QWEN_MAX_MODEL).strip() or DEFAULT_QWEN_MAX_MODEL
     CONTEXT_UPLOAD_PARSE_TIMEOUT_SECONDS: int = int(os.getenv("CONTEXT_UPLOAD_PARSE_TIMEOUT_SECONDS", 60))
     CONTEXT_GENERATED_DIR: str = os.getenv("CONTEXT_GENERATED_DIR", str(DATA_DIR / "context_files"))
     CONTEXT_CACHE_FILE: str = os.getenv("CONTEXT_CACHE_FILE", str(DATA_DIR / "context_cache.json"))
@@ -132,13 +144,30 @@ VERSION_LABEL = f"v{VERSION}（modified by softs2005）"
 settings = Settings()
 
 # 全局映射：仅保留用户指定的 Qwen 短别名，其余模型由上游列表提供。
+# 目标模型来自 Settings，避免每次上游换代都要改代码。
 MODEL_MAP = {
-    "qwen-max": "qwen3.8-max-preview",
-    "qwen-plus": "qwen3.7-plus",
+    "qwen-max": settings.QWEN_MAX_MODEL,
+    "qwen-plus": settings.QWEN_PLUS_MODEL,
 }
 
+
 def resolve_model(name: str) -> str:
-    return MODEL_MAP.get(name, name)
+    """将短别名解析为上游模型，同时容忍调用方的空白和大小写差异。"""
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        return raw_name
+    return MODEL_MAP.get(raw_name, MODEL_MAP.get(raw_name.lower(), raw_name))
+
+
+def default_prewarm_models() -> tuple[str, ...]:
+    """返回与短别名一致的默认预热模型集合。"""
+    return tuple(
+        dict.fromkeys(
+            model
+            for model in (MODEL_MAP.get("qwen-max"), MODEL_MAP.get("qwen-plus"))
+            if str(model or "").strip()
+        )
+    )
 
 
 GENERIC_QWEN_CODE_MODELS = {
@@ -146,6 +175,8 @@ GENERIC_QWEN_CODE_MODELS = {
     "qwen-plus",
     "qwen-max",
     "qwen",
+    settings.QWEN_MAX_MODEL,
+    settings.QWEN_PLUS_MODEL,
 }
 
 
@@ -184,9 +215,14 @@ def should_route_qwen_code_to_coder(
     if _is_explicit_non_coder_model(requested_model):
         return False
 
-    if tool_enabled and settings.QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS and resolved_model in GENERIC_QWEN_CODE_MODELS:
+    generic_models = GENERIC_QWEN_CODE_MODELS | {
+        str(model).strip()
+        for model in MODEL_MAP.values()
+        if str(model or "").strip()
+    }
+    if tool_enabled and settings.QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS and resolved_model in generic_models:
         return True
-    if coding_intent and settings.QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS and resolved_model in GENERIC_QWEN_CODE_MODELS:
+    if coding_intent and settings.QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS and resolved_model in generic_models:
         return True
     return False
 

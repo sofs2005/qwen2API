@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from backend.core.config import settings
+from backend.core.config import default_prewarm_models, resolve_model, settings
 
 log = logging.getLogger("qwen2api.chat_id_pool")
 
@@ -19,7 +19,7 @@ def normalize_chat_type(chat_type: str | None) -> str:
 
 
 def warm_chat_key(email: str, model: str, chat_type: str | None = "t2t") -> str:
-    return f"{str(email or '').strip().lower()}|{str(model or '').strip()}|{normalize_chat_type(chat_type)}"
+    return f"{str(email or '').strip().lower()}|{resolve_model(model)}|{normalize_chat_type(chat_type)}"
 
 
 @dataclass
@@ -44,9 +44,13 @@ class ChatIDPool:
 
     def _configured_desired_models(self) -> dict[str, tuple[str, str]]:
         desired: dict[str, tuple[str, str]] = {}
-        raw_models = str(getattr(settings, "CHAT_ID_PREWARM_MODELS", "") or "")
-        for raw_model in raw_models.split(","):
-            model = raw_model.strip()
+        configured = getattr(settings, "CHAT_ID_PREWARM_MODELS", None)
+        if configured is None:
+            raw_models = default_prewarm_models()
+        else:
+            raw_models = str(configured).split(",")
+        for raw_model in raw_models:
+            model = resolve_model(raw_model)
             if not model:
                 continue
             chat_type = "t2t"
@@ -59,9 +63,11 @@ class ChatIDPool:
     async def remember_model(self, model: str, chat_type: str = "t2t") -> None:
         if not self.enabled():
             return
-        key = f"{str(model or '').strip()}|{normalize_chat_type(chat_type)}"
+        resolved_model = resolve_model(model)
+        normalized_chat_type = normalize_chat_type(chat_type)
+        key = f"{resolved_model}|{normalized_chat_type}"
         async with self._lock:
-            self._desired[key] = (str(model or "").strip(), normalize_chat_type(chat_type))
+            self._desired[key] = (resolved_model, normalized_chat_type)
         self.trigger_fill()
 
     async def take(self, email: str, model: str, chat_type: str = "t2t") -> tuple[str | None, bool]:
@@ -153,6 +159,7 @@ class ChatIDPool:
         return base + ChatIDPool._jitter(email, model, chat_type)
 
     async def _create_warm_chat(self, semaphore: asyncio.Semaphore, acc, model: str, chat_type: str, slot: int = 0, total: int = 1) -> None:
+        model = resolve_model(model)
         # 先错峰再获取信号量：按账号序位在错峰窗口内铺开起跑时间，
         # 避免高并发下所有任务同时拿到信号量后仍形成密集请求脉冲触发上游风控
         delay = self._spread_delay(slot, total, getattr(acc, "email", ""), model, chat_type)

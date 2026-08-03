@@ -120,7 +120,7 @@ class QwenExecutorAccountFlowTests(unittest.IsolatedAsyncioTestCase):
             }
 
         executor = QwenExecutor(SimpleNamespace(_request_json=fake_request), _Pool())
-        chat_id = await executor.create_chat(account, "qwen3.8-max-preview")
+        chat_id = await executor.create_chat(account, "qwen3.8-max")
 
         self.assertEqual(chat_id, "chat-waf-1")
         self.assertEqual(seen["path"], "/api/v2/chats/new")

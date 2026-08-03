@@ -39,7 +39,7 @@ class UpstreamPayloadBuilderTests(unittest.TestCase):
         files = [{"type": "file", "id": "f1", "status": "uploaded"}]
         payload = build_chat_payload(
             "chat-1",
-            "qwen3.8-max-preview",
+            "qwen3.8-max",
             "hello",
             has_custom_tools=True,
             files=files,
@@ -56,7 +56,7 @@ class UpstreamPayloadBuilderTests(unittest.TestCase):
 
     def test_feature_config_without_files_strips_enable_tool_keys(self) -> None:
         """无附件时也不再塞 enable_tools / tool_choice。"""
-        payload = build_chat_payload("chat-1", "qwen3.8-max-preview", "hello", has_custom_tools=True)
+        payload = build_chat_payload("chat-1", "qwen3.8-max", "hello", has_custom_tools=True)
         fc = payload["messages"][0]["feature_config"]
         self.assertEqual(fc.get("function_calling"), False)
         for banned in ("enable_tools", "enable_function_call", "tool_choice"):

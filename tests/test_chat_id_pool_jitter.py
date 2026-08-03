@@ -60,7 +60,7 @@ class ChatIDPoolJitterTests(unittest.IsolatedAsyncioTestCase):
         # 计算期望的确定性抖动值
         jitter_key = f"{acc.email}|qwen3.7-plus|t2t"
         expected_hash = int(hashlib.sha256(jitter_key.encode()).hexdigest(), 16)
-        expected_jitter = (expected_hash % 2000) / 1000.0  # 0~2s 范围
+        expected_jitter = (expected_hash % 1000) / 1000.0 * 1.5  # 默认 0~1.5s 范围
 
         sleep_calls: list[float] = []
         original_sleep = asyncio.sleep

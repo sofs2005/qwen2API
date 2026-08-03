@@ -1,9 +1,10 @@
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from backend.api.models import _build_model_list_payload, list_models
-from backend.core.config import MODEL_MAP, resolve_model, settings
+from backend.core.config import MODEL_MAP, resolve_model, settings, should_route_qwen_code_to_coder
 
 
 class ModelAliasTests(unittest.TestCase):
@@ -11,14 +12,28 @@ class ModelAliasTests(unittest.TestCase):
         self.assertEqual(
             MODEL_MAP,
             {
-                "qwen-max": "qwen3.8-max-preview",
+                "qwen-max": "qwen3.8-max",
                 "qwen-plus": "qwen3.7-plus",
             },
         )
 
     def test_qwen_short_aliases_resolve_to_current_upstream_names(self) -> None:
-        self.assertEqual(resolve_model("qwen-max"), "qwen3.8-max-preview")
+        self.assertEqual(resolve_model("qwen-max"), "qwen3.8-max")
         self.assertEqual(resolve_model("qwen-plus"), "qwen3.7-plus")
+
+    def test_qwen_short_aliases_ignore_case_and_surrounding_whitespace(self) -> None:
+        self.assertEqual(resolve_model(" QWEN-MAX "), "qwen3.8-max")
+        self.assertEqual(resolve_model("QWEN-PLUS"), "qwen3.7-plus")
+
+    def test_qwen_code_route_recognizes_configured_alias_targets(self) -> None:
+        with patch.object(settings, "QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS", True):
+            self.assertTrue(
+                should_route_qwen_code_to_coder(
+                    "qwen-max",
+                    client_profile="qwen_code_openai",
+                    tool_enabled=True,
+                )
+            )
 
     def test_model_list_fallback_only_includes_required_qwen_short_aliases(self) -> None:
         payload = _build_model_list_payload()
@@ -41,7 +56,7 @@ class _FakeQwenClient:
         return [
             {"id": "qwen3.6-plus"},
             {"id": "qwen3.6-max-preview"},
-            {"id": "qwen3.8-max-preview"},
+            {"id": "qwen3.8-max"},
         ]
 
 
@@ -77,7 +92,7 @@ class ModelListEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(qwen_client.called)
         self.assertEqual(
             model_ids,
-            ["qwen3.6-plus", "qwen3.6-max-preview", "qwen3.8-max-preview", "qwen-max", "qwen-plus"],
+            ["qwen3.6-plus", "qwen3.6-max-preview", "qwen3.8-max", "qwen-max", "qwen-plus"],
         )
 
     async def test_model_list_can_disable_upstream_models(self) -> None:

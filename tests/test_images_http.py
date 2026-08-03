@@ -36,7 +36,8 @@ class ImagesHttpTests(unittest.TestCase):
             self.assertEqual(images._resolve_image_model(None), "qwen3.9-max-preview")
             self.assertEqual(images._resolve_image_model(""), "qwen3.9-max-preview")
             self.assertEqual(images._resolve_image_model("dall-e-3"), "qwen3.9-max-preview")
-            self.assertEqual(images._resolve_image_model("qwen3.8-max-preview"), "qwen3.8-max-preview")
+            self.assertEqual(images._resolve_image_model("qwen-max"), "qwen3.8-max")
+            self.assertEqual(images._resolve_image_model("qwen3.8-max"), "qwen3.8-max")
 
     def test_extract_image_urls_from_function_tool_result_extra(self) -> None:
         """官网 image_gen：image_list 与 tool_result 是同图两条 CDN 路径，只取 image_list。"""
@@ -133,7 +134,7 @@ class ImagesHttpTests(unittest.TestCase):
         response = client.post(
             "/v1/images/generations",
             headers={"Authorization": f"Bearer {settings.ADMIN_KEY}"},
-            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max-preview"},
+            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -215,7 +216,7 @@ class ImagesHttpTests(unittest.TestCase):
         response = client.post(
             "/v1/images/generations",
             headers={"Authorization": f"Bearer {settings.ADMIN_KEY}"},
-            json={"prompt": "生成两张图", "n": 2, "model": "qwen3.8-max-preview"},
+            json={"prompt": "生成两张图", "n": 2, "model": "qwen3.8-max"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -272,7 +273,7 @@ class ImagesHttpTests(unittest.TestCase):
         response = client.post(
             "/v1/images/generations",
             headers={"Authorization": f"Bearer {settings.ADMIN_KEY}"},
-            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max-preview"},
+            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -323,7 +324,7 @@ class ImagesHttpTests(unittest.TestCase):
         response = client.post(
             "/v1/images/generations",
             headers={"Authorization": f"Bearer {settings.ADMIN_KEY}"},
-            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max-preview"},
+            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -356,7 +357,7 @@ class ImagesHttpTests(unittest.TestCase):
         response = client.post(
             "/v1/images/generations",
             headers={"Authorization": f"Bearer {settings.ADMIN_KEY}"},
-            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max-preview"},
+            json={"prompt": "生成一张图", "n": 1, "model": "qwen3.8-max"},
         )
 
         self.assertEqual(response.status_code, 500)

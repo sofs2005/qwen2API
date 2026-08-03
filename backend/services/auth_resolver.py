@@ -4,6 +4,7 @@ import logging
 
 from backend.core.account_pool import Account, AccountPool
 from backend.core.browser_fingerprint import fingerprint_for_account, get_session
+from backend.core.config import resolve_model
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ class AuthResolver:
                 )
                 seed_resp = await session.post(
                     f"{BASE_URL}/api/v2/chats/new",
-                    json={"model": "qwen-max", "chat_type": "t2t"},
+                    json={"model": resolve_model("qwen-max"), "chat_type": "t2t"},
                     headers=seed_headers,
                 )
                 acw_tc = seed_resp.cookies.get("acw_tc", "")

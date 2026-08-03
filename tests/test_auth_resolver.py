@@ -84,6 +84,8 @@ class AuthResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][1]["email"], "user@example.com")
         self.assertNotEqual(calls[0][1]["password"], "secret")
         self.assertEqual(calls[0][2]["User-Agent"], fingerprint.user_agent)
+        self.assertEqual(calls[1][0], f"{BASE_URL}/api/v2/chats/new")
+        self.assertEqual(calls[1][1]["model"], "qwen3.8-max")
 
     async def test_refresh_token_returns_false_on_non_200(self) -> None:
         pool = _DummyPool()

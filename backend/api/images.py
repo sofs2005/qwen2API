@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from backend.core.config import settings
+from backend.core.config import resolve_model, settings
 from backend.services.qwen_client import QwenClient
 
 log = logging.getLogger("qwen2api.images")
@@ -33,9 +33,9 @@ GENERATED_IMAGE_PURPOSE = "generated_image"
 
 
 def _default_image_model() -> str:
-    """从 env 读取默认生图模型，缺省 qwen3.8-max-preview。"""
+    """从 env 读取默认生图模型，缺省 qwen3.8-max。"""
     name = str(getattr(settings, "IMAGE_GENERATION_MODEL", "") or "").strip()
-    return name or "qwen3.8-max-preview"
+    return name or "qwen3.8-max"
 
 
 def _dedupe_urls(urls: list[str]) -> list[str]:
@@ -136,8 +136,10 @@ def _resolve_image_model(requested: str | None) -> str:
     name = str(requested or "").strip()
     if not name:
         return default
-    lower = name.lower()
-    if lower.startswith("qwen"):
+    resolved = resolve_model(name)
+    if resolved != name:
+        return resolved
+    if name.lower().startswith("qwen"):
         return name
     return default
 
