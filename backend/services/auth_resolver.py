@@ -61,7 +61,7 @@ class AuthResolver:
         try:
             # Token 刷新最多重试 3 次，带退避间隔避免连续请求触发 WAF
             max_retries = 3
-            retry_delays = [30, 60, 120]  # 秒：第1次等30s，第2次等60s，第3次等120s
+            retry_delays = [5*60, 10*60, 20*60]  # 分钟：第1次等5分钟，第2次等10分钟，第3次等20分钟
             ok = False
             for attempt in range(max_retries):
                 ok = await self.refresh_token(acc)
